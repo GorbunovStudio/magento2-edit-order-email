@@ -15,6 +15,7 @@ use Magento\Customer\Api\AccountManagementInterface;
 use Magento\Customer\Api\CustomerRepositoryInterface;
 use Magento\Framework\Controller\Result\Json;
 use Magento\Framework\Controller\Result\JsonFactory;
+use Magento\Framework\Event\ManagerInterface as EventManager;
 use Magento\Framework\Validator\EmailAddress;
 use Magento\Sales\Api\Data\OrderInterface;
 use Magento\Sales\Api\OrderCustomerManagementInterface;
@@ -57,6 +58,8 @@ class Index extends Action
      */
     private $authSession;
 
+    private EventManager $eventManager;
+
     /**
      * Index constructor.
      * @param Context $context
@@ -76,7 +79,8 @@ class Index extends Action
         JsonFactory $resultJsonFactory,
         CustomerRepositoryInterface $customerRepository,
         EmailAddress $emailAddressValidator,
-        Session $authSession
+        Session $authSession,
+        EventManager $eventManager
     ) {
         parent::__construct($context);
 
@@ -87,6 +91,7 @@ class Index extends Action
         $this->customerRepository = $customerRepository;
         $this->emailAddressValidator = $emailAddressValidator;
         $this->authSession = $authSession;
+        $this->eventManager = $eventManager;
     }
 
     /**
@@ -139,7 +144,7 @@ class Index extends Action
                 $order->addStatusHistoryComment($comment);
                 $order->setCustomerEmail($emailAddress);
                 $this->orderRepository->save($order);
-                
+
                 foreach ($order->getAddressesCollection() as $address)
                 {
                     $address->setEmail($emailAddress)->save();
@@ -157,6 +162,15 @@ class Index extends Action
                     $this->customerRepository->save($customer);
                 }
             }
+
+            $this->eventManager->dispatch(
+                'budsies_sales_order_customer_email_change',
+                [
+                    'order'              => $order,
+                    'new_customer_email' => $emailAddress,
+                    'old_customer_email' => $oldEmailAddress,
+                ]
+            );
 
             return $resultJson->setData(
                 [
