@@ -20,6 +20,7 @@ use Magento\Framework\Validator\EmailAddress;
 use Magento\Sales\Api\Data\OrderInterface;
 use Magento\Sales\Api\OrderCustomerManagementInterface;
 use Magento\Sales\Api\OrderRepositoryInterface;
+use Budsies\Sales\Service\CreateNewCustomerIfUserIsGuest;
 
 class Index extends Action
 {
@@ -59,6 +60,10 @@ class Index extends Action
     private $authSession;
 
     private EventManager $eventManager;
+    /**
+     * @var CreateNewCustomerIfUserIsGuest
+     */
+    private CreateNewCustomerIfUserIsGuest $createNewCustomerIfUserIsGuest;
 
     /**
      * Index constructor.
@@ -70,6 +75,8 @@ class Index extends Action
      * @param CustomerRepositoryInterface $customerRepository
      * @param EmailAddress $emailAddressValidator
      * @param Session $authSession
+     * @param EventManager $eventManager
+     * @param CreateNewCustomerIfUserIsGuest $createNewCustomerIfUserIsGuest
      */
     public function __construct(
         Context $context,
@@ -80,7 +87,8 @@ class Index extends Action
         CustomerRepositoryInterface $customerRepository,
         EmailAddress $emailAddressValidator,
         Session $authSession,
-        EventManager $eventManager
+        EventManager $eventManager,
+        CreateNewCustomerIfUserIsGuest $createNewCustomerIfUserIsGuest
     ) {
         parent::__construct($context);
 
@@ -92,6 +100,7 @@ class Index extends Action
         $this->emailAddressValidator = $emailAddressValidator;
         $this->authSession = $authSession;
         $this->eventManager = $eventManager;
+        $this->createNewCustomerIfUserIsGuest = $createNewCustomerIfUserIsGuest;
     }
 
     /**
@@ -143,6 +152,8 @@ class Index extends Action
 
                 $order->addStatusHistoryComment($comment);
                 $order->setCustomerEmail($emailAddress);
+
+                $customer = $this->createNewCustomerIfUserIsGuest->execute($order);
                 $this->orderRepository->save($order);
 
                 foreach ($order->getAddressesCollection() as $address)
