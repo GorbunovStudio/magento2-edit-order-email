@@ -24,8 +24,12 @@
 
             <?php if ($block->hasCustomerId()) : ?>
             <div class="checkbox">
-                <input type="checkbox" class="checkbox" id="update_customer_email" name="update_customer_email" value="1" <?= $block->getAutocheckEmail() == 1 ? 'checked' : '' ?>>
-                <label for="update_customer_email"><?php echo __('Update Customer Record') ?></label>
+                <input type="checkbox" class="checkbox" id="create_new_customer" name="create_new_customer" value="1" <?= $block->getAutocheckCreateNewCustomerFlag() == 1 ? 'checked' : '' ?>>
+                <label for="create_new_customer"><?php echo __('Create new customer') ?></label>
+            </div>
+            <div class="checkbox">
+                <input type="checkbox" class="checkbox" id="assign_to_another_customer" name="assign_to_another_customer" value="1" <?= $block->getAutocheckAssignToAnotherCustomerFlag() == 1 ? 'checked' : '' ?>>
+                <label for="assign_to_another_customer"><?php echo __('Assign to another customer if it exists') ?></label>
             </div>
             <?php endif; ?>
 

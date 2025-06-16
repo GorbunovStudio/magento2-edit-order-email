@@ -114,7 +114,8 @@ class Index extends Action
         $orderId = $request->getPost('order_id');
         $emailAddress = trim($request->getPost('email'));
         $oldEmailAddress = $request->getPost('old_email');
-        $updateCustomerEmailRecord = $request->getPost('update_customer_email');
+        $createNewCustomerRecord = $request->getPost('create_new_customer');
+        $assignToAnotherCustomerRecord = $request->getPost('assign_to_another_customer');
         $resultJson = $this->resultJsonFactory->create();
 
         if (!isset($orderId)) {
