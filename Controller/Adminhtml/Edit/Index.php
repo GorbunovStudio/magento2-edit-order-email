@@ -17,12 +17,11 @@ use Magento\Framework\Controller\Result\Json;
 use Magento\Framework\Controller\Result\JsonFactory;
 use Magento\Framework\Event\ManagerInterface as EventManager;
 use Magento\Framework\Validator\EmailAddress;
-use Magento\Sales\Api\Data\OrderInterface;
 use Magento\Sales\Api\OrderCustomerManagementInterface;
 use Magento\Sales\Api\OrderRepositoryInterface;
-use Budsies\Sales\Service\CreateNewCustomerIfUserIsGuest;
 use Budsies\Sales\Service\CustomerProvider;
 use Budsies\Sales\Service\NewCustomerCreator;
+use MagePal\EditOrderEmail\Service\UpdateCustomerInOrder;
 
 class Index extends Action
 {
@@ -60,9 +59,10 @@ class Index extends Action
      * @var Session
      */
     private $authSession;
-
+    /**
+     * @var EventManager
+     */
     private EventManager $eventManager;
-
     /**
      * @var CustomerProvider
      */
@@ -71,6 +71,8 @@ class Index extends Action
      * @var NewCustomerCreator
      */
     private NewCustomerCreator $newCustomerCreator;
+
+    private UpdateCustomerInOrder $updateCustomerInOrder;
 
     /**
      * Index constructor.
@@ -86,6 +88,7 @@ class Index extends Action
      * @param CreateNewCustomerIfUserIsGuest $createNewCustomerIfUserIsGuest
      * @param CustomerProvider $customerProvider
      * @param NewCustomerCreator $newCustomerCreator
+     * @param UpdateCustomerInOrder $updateCustomerInOrder
      */
     public function __construct(
         Context $context,
@@ -98,7 +101,8 @@ class Index extends Action
         Session $authSession,
         EventManager $eventManager,
         CustomerProvider $customerProvider,
-        NewCustomerCreator $newCustomerCreator
+        NewCustomerCreator $newCustomerCreator,
+        UpdateCustomerInOrder $updateCustomerInOrder,
     ) {
         parent::__construct($context);
         $this->orderRepository = $orderRepository;
@@ -111,6 +115,7 @@ class Index extends Action
         $this->eventManager = $eventManager;
         $this->customerProvider = $customerProvider;
         $this->newCustomerCreator = $newCustomerCreator;
+        $this->updateCustomerInOrder = $updateCustomerInOrder;
     }
 
     /**
@@ -151,15 +156,21 @@ class Index extends Action
                 throw new \Exception(__('Order not found or email mismatch.'));
             }
 
+            if ($emailAddress == $oldEmailAddress) {
+                return $resultJson->setData([
+                    'error' => true,
+                    'message' => __('Email address is the same as the old one.'),
+                    'email' => $emailAddress,
+                    'ajaxExpired' => false
+                ]);
+            }
+
             $websiteId = $order->getStore()->getWebsiteId();
             $customer = $this->customerProvider->getCustomerByEmail($emailAddress, $websiteId);
 
             if ($customer) {
                 if ($assignToAnotherCustomerRecord == 1) {
-                    $order->setCustomerEmail($customer->getEmail());
-                    $order->setCustomerId($customer->getId());
-                    $order->setCustomerGroupId($customer->getGroupId());
-                    $order->setCustomerIsGuest(0);
+                    $order = $this->updateCustomerInOrder->update($order, $customer);
                 } else {
                     return $resultJson->setData([
                         'error' => true,
@@ -171,10 +182,7 @@ class Index extends Action
             } else {
                 if ($createNewCustomerRecord == 1 && $order->getCustomerId()) {
                     $newCustomer = $this->newCustomerCreator->create($order->getEntityId(), $order->getStoreId());
-                    $order->setCustomerEmail($newCustomer->getEmail());
-                    $order->setCustomerId($newCustomer->getId());
-                    $order->setCustomerGroupId($newCustomer->getGroupId());
-                    $order->setCustomerIsGuest(0);
+                    $order = $this->updateCustomerInOrder->update($order, $newCustomer);
                 } else {
                     $order->setCustomerEmail($emailAddress);
                 }
