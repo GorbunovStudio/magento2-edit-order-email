@@ -22,26 +22,104 @@ use Magento\Sales\Api\OrderRepositoryInterface;
 use Budsies\Sales\Service\CustomerProvider;
 use Budsies\Sales\Service\NewCustomerCreator;
 use MagePal\EditOrderEmail\Service\UpdateCustomerInOrder;
+use Budsies\Sales\Service\BindCustomerWithOrders;
 
 class Index extends Action
 {
 
     const ADMIN_RESOURCE = 'MagePal_EditOrderEmail::magepal_editorderemail';
+    /**
+     * @var OrderRepositoryInterface
+     */
+    protected $orderRepository;
+
+    /**
+     * @var AccountManagementInterface
+     */
+    protected $accountManagement;
+
+    /**
+     * @var OrderCustomerManagementInterface
+     */
+    protected $orderCustomerService;
+
+    /**
+     * @var CustomerRepositoryInterface $customerRepository
+     */
+    protected $customerRepository;
+
+    /**
+     * @var JsonFactory
+     */
+    protected $resultJsonFactory;
+    /**
+     * @var EmailAddress
+     */
+    private $emailAddressValidator;
+    /**
+     * @var Session
+     */
+    private $authSession;
+    /**
+     * @var EventManager
+     */
+    private EventManager $eventManager;
+    /**
+     * @var CustomerProvider
+     */
+    private CustomerProvider $customerProvider;
+    /**
+     * @var NewCustomerCreator
+     */
+    private NewCustomerCreator $newCustomerCreator;
+    /**
+     * @var UpdateCustomerInOrder
+     */
+    private BindCustomerWithOrders $bindCustomerWithOrders;
+
+    /**
+     * Index constructor.
+     * @param Context $context
+     * @param OrderRepositoryInterface $orderRepository
+     * @param AccountManagementInterface $accountManagement
+     * @param OrderCustomerManagementInterface $orderCustomerService
+     * @param JsonFactory $resultJsonFactory
+     * @param CustomerRepositoryInterface $customerRepository
+     * @param EmailAddress $emailAddressValidator
+     * @param Session $authSession
+     * @param EventManager $eventManager
+     * @param CreateNewCustomerIfUserIsGuest $createNewCustomerIfUserIsGuest
+     * @param CustomerProvider $customerProvider
+     * @param NewCustomerCreator $newCustomerCreator
+     * @param BindCustomerWithOrders $bindCustomerWithOrders
+     */
     
     public function __construct(
-        private Context $context,
-        private OrderRepositoryInterface $orderRepository,
-        private AccountManagementInterface $accountManagement,
-        private OrderCustomerManagementInterface $orderCustomerService,
-        private JsonFactory $resultJsonFactory,
-        private CustomerRepositoryInterface $customerRepository,
-        private EmailAddress $emailAddressValidator,
-        private Session $authSession,
-        private EventManager $eventManager,
-        private CustomerProvider $customerProvider,
-        private NewCustomerCreator $newCustomerCreator,
-        private UpdateCustomerInOrder $updateCustomerInOrder,
+        Context $context,
+        OrderRepositoryInterface $orderRepository,
+        AccountManagementInterface $accountManagement,
+        OrderCustomerManagementInterface $orderCustomerService,
+        JsonFactory $resultJsonFactory,
+        CustomerRepositoryInterface $customerRepository,
+        EmailAddress $emailAddressValidator,
+        Session $authSession,
+        EventManager $eventManager,
+        CustomerProvider $customerProvider,
+        NewCustomerCreator $newCustomerCreator,
+        BindCustomerWithOrders $bindCustomerWithOrders,
     ) {
+        parent::__construct($context);
+        $this->orderRepository = $orderRepository;
+        $this->orderCustomerService = $orderCustomerService;
+        $this->resultJsonFactory = $resultJsonFactory;
+        $this->accountManagement = $accountManagement;
+        $this->customerRepository = $customerRepository;
+        $this->emailAddressValidator = $emailAddressValidator;
+        $this->authSession = $authSession;
+        $this->eventManager = $eventManager;
+        $this->customerProvider = $customerProvider;
+        $this->newCustomerCreator = $newCustomerCreator;
+        $this->bindCustomerWithOrders = $bindCustomerWithOrders;
     }
 
     /**
@@ -96,11 +174,11 @@ class Index extends Action
 
             if ($customer) {
                 if ($assignToAnotherCustomerRecord == 1) {
-                    $order = $this->updateCustomerInOrder->update($order, $customer);
+                    $order = $this->bindCustomerWithOrders->updateCustomerInOrder($order, $customer);
                 } else {
                     return $resultJson->setData([
                         'error' => true,
-                        'message' => __('Customer with this email already exists. Please check the checkbox to assign.'),
+                        'message' => __('Customer with this email already exists. Please select the checkbox to assign.'),
                         'email' => '',
                         'ajaxExpired' => false
                     ]);
@@ -111,11 +189,16 @@ class Index extends Action
                     $order->setCustomerEmail($emailAddress);
 
                     $newCustomer = $this->newCustomerCreator->create($order->getEntityId(), $order->getStoreId(), $emailAddress);
-                    $order = $this->updateCustomerInOrder->update($order, $newCustomer);
+                    $order = $this->bindCustomerWithOrders->updateCustomerInOrder($order, $newCustomer);
+                    
                 } else {
                     $order->setCustomerEmail($emailAddress);
 
                     $customerFromOrder = $this->customerProvider->getCustomerByEmail($oldEmailAddress, $websiteId);
+                    if (!$customerFromOrder) {
+                        throw new \Exception(__('Customer with email address "'. $oldEmailAddress .'" not found.'));
+                    }
+
                     $customerFromOrder->setEmail($emailAddress);
                     $this->customerRepository->save($customerFromOrder);
                 }
