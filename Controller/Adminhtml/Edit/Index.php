@@ -23,6 +23,7 @@ use Budsies\Sales\Service\CustomerProvider;
 use Budsies\Sales\Service\NewCustomerCreator;
 use MagePal\EditOrderEmail\Service\UpdateCustomerInOrder;
 use Budsies\Sales\Service\BindCustomerWithOrders;
+use Magento\Sales\Api\Data\OrderInterface;
 
 class Index extends Action
 {
@@ -170,39 +171,36 @@ class Index extends Action
             }
 
             $websiteId = $order->getStore()->getWebsiteId();
-            $customer = $this->customerProvider->getCustomerByEmail($emailAddress, $websiteId);
+            $customerForNewEmail = $this->customerProvider->getCustomerByEmail($emailAddress, $websiteId);
+            $hasOrderCustomer = $order->getCustomerId() ? true : false;
 
-            if ($customer) {
-                if ($assignToAnotherCustomerRecord == 1) {
-                    $order = $this->bindCustomerWithOrders->updateCustomerInOrder($order, $customer);
-                } else {
-                    return $resultJson->setData([
-                        'error' => true,
-                        'message' => __('Customer with this email already exists. Please select the checkbox to assign.'),
-                        'email' => '',
-                        'ajaxExpired' => false
-                    ]);
-                }
+            if ($customerForNewEmail) {
+                    if ($assignToAnotherCustomerRecord) {
+                        $order = $this->bindCustomerWithOrders->updateCustomerInOrder($order, $customerForNewEmail);
+                    } else {
+                        return $resultJson->setData([
+                            'error' => true,
+                            'message' => __('Customer with this email already exists. Please select the checkbox to assign.'),
+                            'email' => '',
+                            'ajaxExpired' => false
+                        ]);
+                    }
             } else {
-                if ($createNewCustomerRecord == 1 && $order->getCustomerId()) {
-                    $order->setCustomerId(null);
-                    $order->setCustomerEmail($emailAddress);
-
-                    $newCustomer = $this->newCustomerCreator->create($order->getEntityId(), $order->getStoreId(), $emailAddress);
-                    $order = $this->bindCustomerWithOrders->updateCustomerInOrder($order, $newCustomer);
-                    
-                } else {
-                    $order->setCustomerEmail($emailAddress);
-
-                    $customerFromOrder = $this->customerProvider->getCustomerByEmail($oldEmailAddress, $websiteId);
+                if ($hasOrderCustomer && !$createNewCustomerRecord) {
+                    $customerFromOrder = $this->customerRepository->getById($order->getCustomerId());
                     if (!$customerFromOrder) {
                         throw new \Exception(__('Customer with email address "'. $oldEmailAddress .'" not found.'));
                     }
 
                     $customerFromOrder->setEmail($emailAddress);
                     $this->customerRepository->save($customerFromOrder);
+
+                    $order->setCustomerEmail($emailAddress);
+                } else {
+                    $order = $this->bindCustomerWithOrders->createNewCustomerAndBindWithOrder($order, $emailAddress);
                 }
             }
+
             $comment = sprintf(
                 __('Order email address change from %s to %s by %s'),
                 $oldEmailAddress,
