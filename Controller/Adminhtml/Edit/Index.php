@@ -17,13 +17,12 @@ use Magento\Framework\Controller\Result\Json;
 use Magento\Framework\Controller\Result\JsonFactory;
 use Magento\Framework\Event\ManagerInterface as EventManager;
 use Magento\Framework\Validator\EmailAddress;
+use Magento\Sales\Api\Data\OrderInterface;
 use Magento\Sales\Api\OrderCustomerManagementInterface;
 use Magento\Sales\Api\OrderRepositoryInterface;
 use Budsies\Sales\Service\CustomerProvider;
-use Budsies\Sales\Service\NewCustomerCreator;
-use MagePal\EditOrderEmail\Service\UpdateCustomerInOrder;
 use Budsies\Sales\Service\BindCustomerWithOrders;
-use Magento\Sales\Api\Data\OrderInterface;
+
 
 class Index extends Action
 {
@@ -69,12 +68,9 @@ class Index extends Action
      * @var CustomerProvider
      */
     private CustomerProvider $customerProvider;
+
     /**
-     * @var NewCustomerCreator
-     */
-    private NewCustomerCreator $newCustomerCreator;
-    /**
-     * @var UpdateCustomerInOrder
+     * @var BindCustomerWithOrders
      */
     private BindCustomerWithOrders $bindCustomerWithOrders;
 
@@ -89,12 +85,9 @@ class Index extends Action
      * @param EmailAddress $emailAddressValidator
      * @param Session $authSession
      * @param EventManager $eventManager
-     * @param CreateNewCustomerIfUserIsGuest $createNewCustomerIfUserIsGuest
      * @param CustomerProvider $customerProvider
-     * @param NewCustomerCreator $newCustomerCreator
      * @param BindCustomerWithOrders $bindCustomerWithOrders
      */
-    
     public function __construct(
         Context $context,
         OrderRepositoryInterface $orderRepository,
@@ -106,10 +99,10 @@ class Index extends Action
         Session $authSession,
         EventManager $eventManager,
         CustomerProvider $customerProvider,
-        NewCustomerCreator $newCustomerCreator,
         BindCustomerWithOrders $bindCustomerWithOrders,
     ) {
         parent::__construct($context);
+
         $this->orderRepository = $orderRepository;
         $this->orderCustomerService = $orderCustomerService;
         $this->resultJsonFactory = $resultJsonFactory;
@@ -119,7 +112,6 @@ class Index extends Action
         $this->authSession = $authSession;
         $this->eventManager = $eventManager;
         $this->customerProvider = $customerProvider;
-        $this->newCustomerCreator = $newCustomerCreator;
         $this->bindCustomerWithOrders = $bindCustomerWithOrders;
     }
 
@@ -180,7 +172,7 @@ class Index extends Action
                     } else {
                         return $resultJson->setData([
                             'error' => true,
-                            'message' => __('Customer with this email already exists. Please select the checkbox to assign.'),
+                            'message' => __('Customer with this email already exists. Please set the checkbox if you want to re-assign the order to that customer.'),
                             'email' => '',
                             'ajaxExpired' => false
                         ]);
