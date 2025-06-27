@@ -87,9 +87,17 @@ class Edit extends Template
     /**
      * @return int
      */
-    public function getAutocheckEmail()
+    public function getAutocheckCreateNewCustomerFlag()
     {
-        return $this->_helper->isSetFlag('general/update_customer_email') ? 1 : 0;
+        return $this->_helper->isSetFlag('general/create_new_customer') ? 1 : 0;
+    }
+
+        /**
+     * @return int
+     */
+    public function getAutocheckAssignToAnotherCustomerFlag()
+    {
+        return $this->_helper->isSetFlag('general/assign_to_another_customer') ? 1 : 0;
     }
 
     /**

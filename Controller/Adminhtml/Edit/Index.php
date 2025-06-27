@@ -20,6 +20,9 @@ use Magento\Framework\Validator\EmailAddress;
 use Magento\Sales\Api\Data\OrderInterface;
 use Magento\Sales\Api\OrderCustomerManagementInterface;
 use Magento\Sales\Api\OrderRepositoryInterface;
+use Budsies\Sales\Service\CustomerProvider;
+use Budsies\Sales\Service\BindCustomerWithOrders;
+
 
 class Index extends Action
 {
@@ -57,8 +60,19 @@ class Index extends Action
      * @var Session
      */
     private $authSession;
-
+    /**
+     * @var EventManager
+     */
     private EventManager $eventManager;
+    /**
+     * @var CustomerProvider
+     */
+    private CustomerProvider $customerProvider;
+
+    /**
+     * @var BindCustomerWithOrders
+     */
+    private BindCustomerWithOrders $bindCustomerWithOrders;
 
     /**
      * Index constructor.
@@ -70,6 +84,9 @@ class Index extends Action
      * @param CustomerRepositoryInterface $customerRepository
      * @param EmailAddress $emailAddressValidator
      * @param Session $authSession
+     * @param EventManager $eventManager
+     * @param CustomerProvider $customerProvider
+     * @param BindCustomerWithOrders $bindCustomerWithOrders
      */
     public function __construct(
         Context $context,
@@ -80,7 +97,9 @@ class Index extends Action
         CustomerRepositoryInterface $customerRepository,
         EmailAddress $emailAddressValidator,
         Session $authSession,
-        EventManager $eventManager
+        EventManager $eventManager,
+        CustomerProvider $customerProvider,
+        BindCustomerWithOrders $bindCustomerWithOrders,
     ) {
         parent::__construct($context);
 
@@ -92,6 +111,8 @@ class Index extends Action
         $this->emailAddressValidator = $emailAddressValidator;
         $this->authSession = $authSession;
         $this->eventManager = $eventManager;
+        $this->customerProvider = $customerProvider;
+        $this->bindCustomerWithOrders = $bindCustomerWithOrders;
     }
 
     /**
@@ -105,90 +126,107 @@ class Index extends Action
         $orderId = $request->getPost('order_id');
         $emailAddress = trim($request->getPost('email'));
         $oldEmailAddress = $request->getPost('old_email');
-        $updateCustomerEmailRecord = $request->getPost('update_customer_email');
+        $createNewCustomerRecord = $request->getPost('create_new_customer');
+        $assignToAnotherCustomerRecord = $request->getPost('assign_to_another_customer');
         $resultJson = $this->resultJsonFactory->create();
 
         if (!isset($orderId)) {
-            return $resultJson->setData(
-                [
-                    'error' => true,
-                    'message' => __('Invalid order id.'),
-                    'email' => '',
-                    'ajaxExpired' => false
-                ]
-            );
+            return $resultJson->setData([
+                'error' => true,
+                'message' => __('Invalid order id.'),
+                'email' => '',
+                'ajaxExpired' => false
+            ]);
         }
-
         if (!$this->emailAddressValidator->isValid($emailAddress)) {
-            return $resultJson->setData(
-                [
-                    'error' => true,
-                    'message' => __('Invalid Email address.'),
-                    'email' => '',
-                    'ajaxExpired' => false
-                ]
-            );
+            return $resultJson->setData([
+                'error' => true,
+                'message' => __('Invalid Email address.'),
+                'email' => '',
+                'ajaxExpired' => false
+            ]);
         }
-
         try {
-            /** @var  $order OrderInterface */
             $order = $this->orderRepository->get($orderId);
-            if ($order->getEntityId() && $order->getCustomerEmail() == $oldEmailAddress) {
-                $comment = sprintf(
-                    __("Order email address change from %s to %s by %s"),
-                    $oldEmailAddress,
-                    $emailAddress,
-                    $this->authSession->getUser()->getUserName()
-                );
 
-                $order->addStatusHistoryComment($comment);
-                $order->setCustomerEmail($emailAddress);
-                $this->orderRepository->save($order);
+            if (!$order->getEntityId() || $order->getCustomerEmail() != $oldEmailAddress) {
+                throw new \Exception(__('Order not found or email mismatch.'));
+            }
 
-                foreach ($order->getAddressesCollection() as $address)
-                {
-                    $address->setEmail($emailAddress)->save();
+            if ($emailAddress == $oldEmailAddress) {
+                return $resultJson->setData([
+                    'error' => true,
+                    'message' => __('Email address is the same as the old one.'),
+                    'email' => $emailAddress,
+                    'ajaxExpired' => false
+                ]);
+            }
+
+            $websiteId = $order->getStore()->getWebsiteId();
+            $customerForNewEmail = $this->customerProvider->getCustomerByEmail($emailAddress, $websiteId);
+            $hasOrderCustomer = $order->getCustomerId() ? true : false;
+
+            if ($customerForNewEmail) {
+                    if ($assignToAnotherCustomerRecord) {
+                        $order = $this->bindCustomerWithOrders->updateCustomerInOrder($order, $customerForNewEmail);
+                    } else {
+                        return $resultJson->setData([
+                            'error' => true,
+                            'message' => __('Customer with this email already exists. Please set the checkbox if you want to re-assign the order to that customer.'),
+                            'email' => '',
+                            'ajaxExpired' => false
+                        ]);
+                    }
+            } else {
+                if ($hasOrderCustomer && !$createNewCustomerRecord) {
+                    $customerFromOrder = $this->customerRepository->getById($order->getCustomerId());
+                    if (!$customerFromOrder) {
+                        throw new \Exception(__('Customer with email address "'. $oldEmailAddress .'" not found.'));
+                    }
+
+                    $customerFromOrder->setEmail($emailAddress);
+                    $this->customerRepository->save($customerFromOrder);
+
+                    $order->setCustomerEmail($emailAddress);
+                } else {
+                    $order = $this->bindCustomerWithOrders->createNewCustomerAndBindWithOrder($order, $emailAddress);
                 }
             }
 
-            //if update customer email
-            if ($updateCustomerEmailRecord == 1
-                && $order->getCustomerId()
-                && $this->accountManagement->isEmailAvailable($emailAddress)
-            ) {
-                $customer = $this->customerRepository->getById($order->getCustomerId());
-                if ($customer->getId()) {
-                    $customer->setEmail($emailAddress);
-                    $this->customerRepository->save($customer);
-                }
-            }
+            $comment = sprintf(
+                __('Order email address change from %s to %s by %s'),
+                $oldEmailAddress,
+                $emailAddress,
+                $this->authSession->getUser()->getUserName()
+            );
+            $order->addStatusHistoryComment($comment);
+            $this->orderRepository->save($order);
 
+            $email = $order->getCustomerEmail();
+            foreach ($order->getAddressesCollection() as $address) {
+                $address->setEmail($email)->save();
+            }
             $this->eventManager->dispatch(
                 'budsies_sales_order_customer_email_change',
                 [
                     'order'              => $order,
-                    'new_customer_email' => $emailAddress,
+                    'new_customer_email' => $email,
                     'old_customer_email' => $oldEmailAddress,
                 ]
             );
-
-            return $resultJson->setData(
-                [
-                    'error' => false,
-                    'message' => __('Email address successfully changed.'),
-                    'email' => $emailAddress,
-                    'ajaxExpired' => false
-                ]
-            );
-        } catch (Exception $e) {
-            return $resultJson->setData(
-                [
-                    'error' => true,
-                    'message' => $e->getMessage(),
-                    'email' => '',
-                    'ajaxExpired' => false
-                ]
-            );
+            return $resultJson->setData([
+                'error' => false,
+                'message' => __('Email address successfully changed.'),
+                'email' => $email,
+                'ajaxExpired' => false
+            ]);
+        } catch (\Exception $e) {
+            return $resultJson->setData([
+                'error' => true,
+                'message' => $e->getMessage(),
+                'email' => '',
+                'ajaxExpired' => false
+            ]);
         }
     }
 }

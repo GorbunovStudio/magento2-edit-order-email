@@ -39,8 +39,12 @@
                 </field>
             </group>
             <group id="general" showInDefault="1" showInStore="1" showInWebsite="1" sortOrder="0" translate="label">
-                <field id="update_customer_email" translate="label" type="select" sortOrder="2" showInDefault="1" showInWebsite="1" showInStore="1">
-                    <label>Automatically update customer record email address</label>
+                <field id="create_new_customer" translate="label" type="select" sortOrder="2" showInDefault="1" showInWebsite="1" showInStore="1">
+                    <label>Automatically create new customer for the new email address</label>
+                    <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
+                </field>
+                <field id="assign_to_another_customer" translate="label" type="select" sortOrder="2" showInDefault="1" showInWebsite="1" showInStore="1">
+                    <label>Automatically assign order to another customer if it is exist</label>
                     <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
                 </field>
             </group>
