@@ -22,6 +22,7 @@ use Magento\Sales\Api\OrderCustomerManagementInterface;
 use Magento\Sales\Api\OrderRepositoryInterface;
 use Budsies\Sales\Service\CustomerProvider;
 use Budsies\Sales\Service\BindCustomerWithOrders;
+use Psr\Log\LoggerInterface;
 
 
 class Index extends Action
@@ -75,6 +76,11 @@ class Index extends Action
     private BindCustomerWithOrders $bindCustomerWithOrders;
 
     /**
+     * @var LoggerInterface
+     */
+    private LoggerInterface $logger;
+
+    /**
      * Index constructor.
      * @param Context $context
      * @param OrderRepositoryInterface $orderRepository
@@ -87,6 +93,7 @@ class Index extends Action
      * @param EventManager $eventManager
      * @param CustomerProvider $customerProvider
      * @param BindCustomerWithOrders $bindCustomerWithOrders
+     * @param LoggerInterface $logger
      */
     public function __construct(
         Context $context,
@@ -100,6 +107,7 @@ class Index extends Action
         EventManager $eventManager,
         CustomerProvider $customerProvider,
         BindCustomerWithOrders $bindCustomerWithOrders,
+        LoggerInterface $logger,
     ) {
         parent::__construct($context);
 
@@ -113,6 +121,7 @@ class Index extends Action
         $this->eventManager = $eventManager;
         $this->customerProvider = $customerProvider;
         $this->bindCustomerWithOrders = $bindCustomerWithOrders;
+        $this->logger = $logger;
     }
 
     /**
@@ -129,6 +138,12 @@ class Index extends Action
         $createNewCustomerRecord = $request->getPost('create_new_customer');
         $assignToAnotherCustomerRecord = $request->getPost('assign_to_another_customer');
         $resultJson = $this->resultJsonFactory->create();
+
+        $this->logger->info(sprintf(
+            '35954 - MagePal - Action started. OrderId: %s, email: %s',
+            (string)$orderId,
+            (string)$emailAddress
+        ));
 
         if (!isset($orderId)) {
             return $resultJson->setData([
@@ -206,6 +221,14 @@ class Index extends Action
             foreach ($order->getAddressesCollection() as $address) {
                 $address->setEmail($email)->save();
             }
+
+            $this->logger->info(sprintf(
+                '35954 - MagePal - Action finished. OrderId: %s, email: %s, old email: %s',
+                (string)$order->getEntityId(),
+                (string)$email,
+                (string)$oldEmailAddress
+            ));
+            
             $this->eventManager->dispatch(
                 'budsies_sales_order_customer_email_change',
                 [
