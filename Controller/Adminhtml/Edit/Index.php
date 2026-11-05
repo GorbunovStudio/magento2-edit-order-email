@@ -15,9 +15,7 @@ use Magento\Customer\Api\AccountManagementInterface;
 use Magento\Customer\Api\CustomerRepositoryInterface;
 use Magento\Framework\Controller\Result\Json;
 use Magento\Framework\Controller\Result\JsonFactory;
-use Magento\Framework\Event\ManagerInterface as EventManager;
 use Magento\Framework\Validator\EmailAddress;
-use Magento\Sales\Api\Data\OrderInterface;
 use Magento\Sales\Api\OrderCustomerManagementInterface;
 use Magento\Sales\Api\OrderRepositoryInterface;
 use Budsies\Sales\Service\CustomerProvider;
@@ -62,10 +60,6 @@ class Index extends Action
      */
     private $authSession;
     /**
-     * @var EventManager
-     */
-    private EventManager $eventManager;
-    /**
      * @var CustomerProvider
      */
     private CustomerProvider $customerProvider;
@@ -90,7 +84,6 @@ class Index extends Action
      * @param CustomerRepositoryInterface $customerRepository
      * @param EmailAddress $emailAddressValidator
      * @param Session $authSession
-     * @param EventManager $eventManager
      * @param CustomerProvider $customerProvider
      * @param BindCustomerWithOrders $bindCustomerWithOrders
      * @param LoggerInterface $logger
@@ -104,7 +97,6 @@ class Index extends Action
         CustomerRepositoryInterface $customerRepository,
         EmailAddress $emailAddressValidator,
         Session $authSession,
-        EventManager $eventManager,
         CustomerProvider $customerProvider,
         BindCustomerWithOrders $bindCustomerWithOrders,
         LoggerInterface $logger,
@@ -118,7 +110,6 @@ class Index extends Action
         $this->customerRepository = $customerRepository;
         $this->emailAddressValidator = $emailAddressValidator;
         $this->authSession = $authSession;
-        $this->eventManager = $eventManager;
         $this->customerProvider = $customerProvider;
         $this->bindCustomerWithOrders = $bindCustomerWithOrders;
         $this->logger = $logger;
@@ -228,15 +219,6 @@ class Index extends Action
                 (string)$email,
                 (string)$oldEmailAddress
             ));
-            
-            $this->eventManager->dispatch(
-                'budsies_sales_order_customer_email_change',
-                [
-                    'order'              => $order,
-                    'new_customer_email' => $email,
-                    'old_customer_email' => $oldEmailAddress,
-                ]
-            );
             return $resultJson->setData([
                 'error' => false,
                 'message' => __('Email address successfully changed.'),
