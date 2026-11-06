@@ -31,7 +31,7 @@ class IndexTest extends TestCase
     {
         $oldEmail = 'old@example.com';
         $newEmail = 'new@example.com';
-        $request = $this->createMock(Http::class);
+        $request = $this->createStub(Http::class);
         $request->method('getPost')->willReturnCallback(static function (string $key) use ($oldEmail, $newEmail) {
             return [
                 'order_id' => 42,
@@ -45,7 +45,7 @@ class IndexTest extends TestCase
         $eventManager = $this->createMock(ManagerInterface::class);
         $eventManager->expects($this->never())->method('dispatch');
 
-        $context = $this->createMock(Context::class);
+        $context = $this->createStub(Context::class);
         $context->method('getRequest')->willReturn($request);
         $context->method('getEventManager')->willReturn($eventManager);
 
@@ -61,7 +61,8 @@ class IndexTest extends TestCase
         $resultFactory = $this->createMock(JsonFactory::class);
         $resultFactory->expects($this->once())->method('create')->willReturn($result);
 
-        $store = $this->createConfiguredMock(StoreInterface::class, ['getWebsiteId' => 1]);
+        $store = $this->createStub(StoreInterface::class);
+        $store->method('getWebsiteId')->willReturn(1);
         $order = $this->createMock(Order::class);
         $order->method('getEntityId')->willReturn(42);
         $order->method('getCustomerEmail')->willReturnOnConsecutiveCalls($oldEmail, $newEmail);
@@ -74,7 +75,7 @@ class IndexTest extends TestCase
         $orderRepository->expects($this->once())->method('get')->with(42)->willReturn($order);
         $orderRepository->expects($this->once())->method('save')->with($order)->willReturn($order);
 
-        $existingCustomer = $this->createMock(CustomerInterface::class);
+        $existingCustomer = $this->createStub(CustomerInterface::class);
         $customerProvider = $this->createMock(CustomerProvider::class);
         $customerProvider->expects($this->once())
             ->method('getCustomerByEmail')
@@ -89,25 +90,26 @@ class IndexTest extends TestCase
         $emailAddressValidator = $this->createMock(EmailAddress::class);
         $emailAddressValidator->expects($this->once())->method('isValid')->with($newEmail)->willReturn(true);
 
-        $user = $this->createConfiguredMock(User::class, ['getUserName' => 'admin']);
-        $authSession = $this->getMockBuilder(Session::class)
-            ->disableOriginalConstructor()
-            ->addMethods(['getUser'])
-            ->getMock();
-        $authSession->method('getUser')->willReturn($user);
+        $user = $this->createStub(User::class);
+        $user->method('getUserName')->willReturn('admin');
+        $authSession = $this->createMock(Session::class);
+        $authSession->expects($this->once())
+            ->method('__call')
+            ->with('getUser', [])
+            ->willReturn($user);
 
         $controller = new Index(
             $context,
             $orderRepository,
-            $this->createMock(AccountManagementInterface::class),
-            $this->createMock(OrderCustomerManagementInterface::class),
+            $this->createStub(AccountManagementInterface::class),
+            $this->createStub(OrderCustomerManagementInterface::class),
             $resultFactory,
-            $this->createMock(CustomerRepositoryInterface::class),
+            $this->createStub(CustomerRepositoryInterface::class),
             $emailAddressValidator,
             $authSession,
             $customerProvider,
             $bindCustomerWithOrders,
-            $this->createMock(LoggerInterface::class),
+            $this->createStub(LoggerInterface::class),
         );
 
         self::assertSame($result, $controller->execute());
