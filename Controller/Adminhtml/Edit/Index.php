@@ -125,6 +125,16 @@ class Index extends Action
                 'ajaxExpired' => false,
             ];
         } catch (Throwable $error) {
+            if ($committing) {
+                $causes = [];
+                for ($cause = $error; $cause !== null; $cause = $cause->getPrevious()) {
+                    $causes[] = ['type' => $cause::class, 'code' => $cause->getCode()];
+                }
+                $this->logger->error('Admin email edit commit could not be confirmed', [
+                    'order_id' => $id,
+                    'causes' => $causes,
+                ]);
+            }
             if ($started && !$committed) {
                 try {
                     $this->resource->getConnection()->rollBack();

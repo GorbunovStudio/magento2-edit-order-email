@@ -349,7 +349,8 @@ class IndexTest extends TestCase
         });
         $connection = $this->createMock(AdapterInterface::class);
         if ($case === 'commit') {
-            $connection->method('commit')->willThrowException(new \RuntimeException('sensitive-detail'));
+            $cause = new \RuntimeException('sensitive-cause', 1213);
+            $connection->method('commit')->willThrowException(new \RuntimeException('sensitive-detail', 42, $cause));
         }
         $rollback = $connection->expects($case === 'unlock' ? self::never() : self::once())->method('rollBack');
         if ($case === 'rollback') {
@@ -380,8 +381,18 @@ class IndexTest extends TestCase
         $session = $this->getMockBuilder(Session::class)->disableOriginalConstructor()->addMethods(['getUser'])->getMock();
         $session->method('getUser')->willReturn($user);
         $editContext = new AdminEmailEditContext();
+        $logger = $this->createMock(LoggerInterface::class);
+        if ($case === 'commit') {
+            $logger->expects(self::once())->method('error')->with('Admin email edit commit could not be confirmed', [
+                'order_id' => 42,
+                'causes' => [
+                    ['type' => \RuntimeException::class, 'code' => 42],
+                    ['type' => \RuntimeException::class, 'code' => 1213],
+                ],
+            ]);
+        }
         $controller = new Index($context, $orders, $factory, $validator, $session, $planner, $editContext,
-            $editor, $resource, $locks, $this->createMock(CustomerRegistry::class), $this->createMock(LoggerInterface::class));
+            $editor, $resource, $locks, $this->createMock(CustomerRegistry::class), $logger);
         self::assertSame($result, $controller->execute());
         self::assertSame(['order_update_1', 'order_update_42'], $names);
         self::assertFalse($editContext->isActive());
