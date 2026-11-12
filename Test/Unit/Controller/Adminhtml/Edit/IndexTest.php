@@ -9,6 +9,7 @@ use Budsies\Sales\Service\AdminEmailEditPlan;
 use Budsies\Sales\Service\AdminEmailEditor;
 use Budsies\Sales\Service\CustomerProvider;
 use Budsies\Sales\Service\NewCustomerCreator;
+use Budsies\Sales\Plugin\Order\Email\Sender\OrderSenderLockPlugin;
 use MagePal\EditOrderEmail\Controller\Adminhtml\Edit\Index;
 use Magento\Backend\App\Action\Context;
 use Magento\Backend\Model\Auth\Session;
@@ -31,7 +32,12 @@ use Magento\Sales\Api\OrderRepositoryInterface;
 use Magento\Sales\Model\Order;
 use Magento\Sales\Model\Order\Address;
 use Magento\Sales\Model\OrderRepository;
+use Magento\Sales\Model\Order\Email\Sender\OrderSender;
+use Magento\Sales\Model\Order\Email\Container\OrderIdentity;
+use Magento\Sales\Model\ResourceModel\Order as OrderResource;
+use Magento\Framework\App\Config\ScopeConfigInterface;
 use Magento\User\Model\User;
+use Magento\Store\Model\Store;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
 
@@ -39,6 +45,113 @@ require_once __DIR__ . '/../../../../../Controller/Adminhtml/Edit/Index.php';
 
 class IndexTest extends TestCase
 {
+    /** @dataProvider senderOrders */
+    public function testActualSenderAndEditorPreserveFlagsAcrossBothOrders(int $senderId, bool $senderFirst): void
+    {
+        $stored = [1 => ['send_email' => 0, 'email_sent' => 1], 42 => ['send_email' => 0, 'email_sent' => 1]];
+        $identity = $this->createMock(OrderIdentity::class);
+        $identity->method('isEnabled')->willReturn(true);
+        $global = $this->createMock(ScopeConfigInterface::class);
+        $global->method('getValue')->willReturn(1);
+        $orderResource = $this->createMock(OrderResource::class);
+        $orderResource->method('saveAttribute')->willReturnCallback(static function ($order, $fields) use (&$stored) {
+            foreach ((array)$fields as $field) {
+                $stored[$order->getId()][$field] = $order->getData($field);
+            }
+            return $order;
+        });
+        $reflection = new \ReflectionClass(OrderSender::class);
+        $sender = $reflection->newInstanceWithoutConstructor();
+        foreach (['identityContainer' => $identity, 'orderResource' => $orderResource, 'globalConfig' => $global] as $name => $value) {
+            $property = $reflection->getProperty($name);
+            $property->setAccessible(true);
+            $property->setValue($sender, $value);
+        }
+        $senderLocks = $this->createMock(LockManagerInterface::class);
+        $senderLocks->method('lock')->willReturn(true);
+        $senderLocks->method('unlock')->willReturn(true);
+        $senderPlugin = new OrderSenderLockPlugin($senderLocks);
+        $send = function () use ($sender, $senderPlugin, $senderId, &$stored) {
+            $order = $this->getMockBuilder(Order::class)->disableOriginalConstructor()->onlyMethods(['getStore'])->getMock();
+            $order->method('getStore')->willReturn($this->createMock(Store::class));
+            $order->setIdFieldName('entity_id');
+            $order->setData(array_merge(['entity_id' => $senderId], $stored[$senderId]));
+            $senderPlugin->aroundSend($sender, static fn ($order, $force) => $sender->send($order, $force), $order);
+        };
+        $request = $this->createMock(Http::class);
+        $request->method('getPost')->willReturnCallback(static fn ($key) => [
+            'order_id' => 42, 'email' => 'new@example.test', 'old_email' => 'old@example.test',
+            'create_new_customer' => false, 'assign_to_another_customer' => false,
+        ][$key] ?? null);
+        $context = $this->createMock(Context::class);
+        $context->method('getRequest')->willReturn($request);
+        $json = $this->createMock(Json::class);
+        $json->expects(self::once())->method('setData')->with(self::callback(
+            static fn (array $data): bool => $data['error'] === false
+        ))->willReturnSelf();
+        $factory = $this->createMock(JsonFactory::class);
+        $factory->method('create')->willReturn($json);
+        $validator = $this->createMock(EmailAddress::class);
+        $validator->method('isValid')->willReturn(true);
+        $planner = $this->createMock(AdminEmailEditPlan::class);
+        $planner->method('plan')->willReturn(['customer_id' => 7, 'account_email' => 'old@example.test',
+            'order_email' => 'old@example.test', 'website_id' => 1, 'cascade' => true, 'order_ids' => [1, 42]]);
+        $locks = $this->createMock(LockManagerInterface::class);
+        $didSend = false;
+        $locks->method('lock')->willReturnCallback(static function () use ($senderFirst, $send, &$didSend) {
+            if ($senderFirst && !$didSend) {
+                $didSend = true;
+                $send();
+            }
+            return true;
+        });
+        $locks->method('unlock')->willReturnCallback(static function ($name) use ($senderFirst, $senderId, $send, &$didSend) {
+            if (!$senderFirst && !$didSend && $name === 'order_update_' . $senderId) {
+                $didSend = true;
+                $send();
+            }
+            return true;
+        });
+        $connection = $this->createMock(AdapterInterface::class);
+        $resource = $this->createMock(ResourceConnection::class);
+        $resource->method('getConnection')->willReturn($connection);
+        $orders = $this->createMock(OrderRepository::class);
+        $orders->expects(self::once())->method('_resetState');
+        $orders->method('get')->willReturnCallback(function () use (&$stored) {
+            $order = $this->getMockBuilder(Order::class)->disableOriginalConstructor()
+                ->onlyMethods(['getAddresses', 'addStatusHistoryComment'])->getMock();
+            $order->setData(array_merge(['entity_id' => 42, 'customer_email' => 'old@example.test'], $stored[42]));
+            $order->method('getAddresses')->willReturn([]);
+            return $order;
+        });
+        $orders->method('save')->willReturnCallback(static function ($order) use (&$stored) {
+            $stored[42] = ['send_email' => $order->getSendEmail(), 'email_sent' => $order->getEmailSent()];
+            return $order;
+        });
+        $editor = $this->createMock(AdminEmailEditor::class);
+        $editor->method('apply')->willReturnCallback(static function ($order) use (&$stored) {
+            $cascade = $stored[1];
+            $stored[1] = $cascade;
+            $order->setCustomerEmail('new@example.test');
+            return false;
+        });
+        $user = $this->createConfiguredMock(User::class, ['getUserName' => 'admin']);
+        $session = $this->getMockBuilder(Session::class)->disableOriginalConstructor()->addMethods(['getUser'])->getMock();
+        $session->method('getUser')->willReturn($user);
+        $controller = new Index($context, $orders, $factory, $validator, $session, $planner,
+            new AdminEmailEditContext(), $editor, $resource, $locks, $this->createMock(CustomerRegistry::class),
+            $this->createMock(LoggerInterface::class));
+        $controller->execute();
+        self::assertTrue($didSend);
+        self::assertEquals(1, $stored[$senderId]['send_email']);
+        self::assertNull($stored[$senderId]['email_sent']);
+    }
+
+    public static function senderOrders(): array
+    {
+        return [[1, true], [1, false], [42, true], [42, false]];
+    }
+
     public function testDispatchRejectsAdministratorWithoutEditorAcl(): void
     {
         $request = $this->createMock(Http::class);
