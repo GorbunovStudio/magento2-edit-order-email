@@ -8,6 +8,7 @@ use Budsies\General\Interface\LockNamePrefixInterface;
 use Budsies\Sales\Service\AdminEmailEditContext;
 use Budsies\Sales\Service\AdminEmailEditPlan;
 use Budsies\Sales\Service\AdminEmailEditor;
+use Budsies\Sales\Service\AdminEmailInputException;
 use Budsies\Sales\Service\AdminEmailStaleEditException;
 use Magento\Backend\App\Action;
 use Magento\Backend\App\Action\Context;
@@ -61,11 +62,11 @@ class Index extends Action
 
         try {
             if (!is_int($id) || !is_string($email) || !is_string($oldEmail)) {
-                throw new AdminEmailStaleEditException('Invalid order or email input.');
+                throw new AdminEmailInputException(__('Invalid order or email input.'));
             }
             $email = trim($email);
             if (!$this->validator->isValid($email)) {
-                throw new AdminEmailStaleEditException('Invalid Email address.');
+                throw new AdminEmailInputException(__('Invalid Email address.'));
             }
             $create = (bool)$request->getPost('create_new_customer');
             $assign = (bool)$request->getPost('assign_to_another_customer');
@@ -133,7 +134,9 @@ class Index extends Action
             }
             if ($committing) {
                 $result['message'] = __('The result could not be confirmed. Refresh before editing again.');
-            } elseif ($error instanceof AdminEmailStaleEditException || $error instanceof NoSuchEntityException) {
+            } elseif ($error instanceof AdminEmailStaleEditException || $error instanceof AdminEmailInputException
+                || $error instanceof NoSuchEntityException
+            ) {
                 $result['message'] = $error instanceof NoSuchEntityException ? __('Order not found.') : $error->getMessage();
             } else {
                 $this->logger->error('Admin email edit failed', ['order_id' => $id, 'type' => $error::class]);
