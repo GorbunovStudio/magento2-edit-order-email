@@ -106,7 +106,7 @@ class Index extends Action
             $comment = sprintf(
                 (string)__('Order email address change from %s to %s by %s'),
                 $oldEmail,
-                $email,
+                $order->getCustomerEmail(),
                 $this->authSession->getUser()->getUserName()
             );
             $order->addStatusHistoryComment($comment);

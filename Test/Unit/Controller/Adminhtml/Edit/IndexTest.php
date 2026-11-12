@@ -141,7 +141,9 @@ class IndexTest extends TestCase
         $resource = $this->createMock(ResourceConnection::class);
         $resource->method('getConnection')->willReturn($connection);
         $order = $this->createMock(Order::class);
-        $order->method('getCustomerEmail')->willReturnOnConsecutiveCalls('old@example.test', 'old@example.test', 'new@example.test');
+        $order->method('getCustomerEmail')->willReturnOnConsecutiveCalls(
+            'old@example.test', 'old@example.test', 'new@example.test', 'new@example.test'
+        );
         $order->method('getAddresses')->willReturn([]);
         $order->expects(self::once())->method('addStatusHistoryComment');
         $orders = $this->createMock(OrderRepository::class);
