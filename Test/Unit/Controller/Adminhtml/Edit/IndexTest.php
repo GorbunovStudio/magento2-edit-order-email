@@ -21,6 +21,7 @@ use Magento\Framework\Lock\LockManagerInterface;
 use Magento\Framework\Validator\EmailAddress;
 use Magento\Sales\Api\OrderRepositoryInterface;
 use Magento\Sales\Model\Order;
+use Magento\Sales\Model\Order\Address;
 use Magento\Sales\Model\OrderRepository;
 use Magento\User\Model\User;
 use PHPUnit\Framework\TestCase;
@@ -228,10 +229,16 @@ class IndexTest extends TestCase
         $resource->method('getConnection')->willReturn($connection);
         $order = $this->createMock(Order::class);
         $order->method('getCustomerEmail')->willReturnOnConsecutiveCalls(
-            'old@example.test', 'old@example.test', 'new@example.test', 'new@example.test'
+            'old@example.test', 'old@example.test', 'new@example.test', 'new@example.test', 'new@example.test'
         );
-        $order->method('getAddresses')->willReturn([]);
-        $order->expects(self::once())->method('addStatusHistoryComment');
+        $address = $this->createMock(Address::class);
+        $address->expects(self::once())->method('setEmail')->with('new@example.test');
+        $order->method('getAddresses')->willReturn([$address]);
+        $order->expects(self::once())->method('addStatusHistoryComment')->with(self::callback(
+            static fn ($comment): bool => str_contains((string)$comment, 'old@example.test')
+                && str_contains((string)$comment, 'new@example.test') && str_contains((string)$comment, 'admin')
+        ));
+        $order->expects(self::never())->method('setStatus');
         $orders = $this->createMock(OrderRepository::class);
         $orders->method('get')->willReturnCallback(static function () use (&$steps, $order) {
             $steps[] = 'load';
