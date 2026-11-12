@@ -7,10 +7,14 @@ namespace MagePal\EditOrderEmail\Test\Unit\Controller\Adminhtml\Edit;
 use Budsies\Sales\Service\AdminEmailEditContext;
 use Budsies\Sales\Service\AdminEmailEditPlan;
 use Budsies\Sales\Service\AdminEmailEditor;
+use Budsies\Sales\Service\CustomerProvider;
+use Budsies\Sales\Service\NewCustomerCreator;
 use MagePal\EditOrderEmail\Controller\Adminhtml\Edit\Index;
 use Magento\Backend\App\Action\Context;
 use Magento\Backend\Model\Auth\Session;
 use Magento\Customer\Model\CustomerRegistry;
+use Magento\Customer\Api\CustomerRepositoryInterface;
+use Magento\Customer\Api\Data\CustomerInterface;
 use Magento\Framework\App\Request\Http;
 use Magento\Framework\App\ResourceConnection;
 use Magento\Framework\Controller\Result\Json;
@@ -31,6 +35,90 @@ require_once __DIR__ . '/../../../../../Controller/Adminhtml/Edit/Index.php';
 
 class IndexTest extends TestCase
 {
+    /** @dataProvider workflowCases */
+    public function testRealEditorWorkflowThroughController(string $kind, bool $guest, bool $assign, bool $create): void
+    {
+        $request = $this->createMock(Http::class);
+        $request->method('getPost')->willReturnCallback(static fn ($key) => [
+            'order_id' => 42, 'email' => 'new@example.test', 'old_email' => 'old@example.test',
+            'create_new_customer' => $create, 'assign_to_another_customer' => $assign,
+        ][$key] ?? null);
+        $context = $this->createMock(Context::class);
+        $context->method('getRequest')->willReturn($request);
+        $result = $this->createMock(Json::class);
+        $rejected = $kind === 'existing' && !$assign;
+        $result->expects(self::once())->method('setData')->with(self::callback(
+            static fn (array $data): bool => $data['error'] === $rejected
+                && ($rejected || $data['email'] === 'new@example.test') && !$data['ajaxExpired']
+        ))->willReturnSelf();
+        $factory = $this->createMock(JsonFactory::class);
+        $factory->method('create')->willReturn($result);
+        $validator = $this->createMock(EmailAddress::class);
+        $validator->method('isValid')->willReturn(true);
+        $priorId = $guest ? null : 7;
+        $planner = $this->createMock(AdminEmailEditPlan::class);
+        $planner->method('plan')->willReturn(['customer_id' => $priorId, 'account_email' => $guest ? null : 'old@example.test',
+            'order_email' => 'old@example.test', 'website_id' => 1, 'cascade' => $kind === 'update', 'order_ids' => [42]]);
+        $order = $this->getMockBuilder(Order::class)->disableOriginalConstructor()
+            ->onlyMethods(['getAddresses', 'addStatusHistoryComment'])->getMock();
+        $order->setData(['entity_id' => 42, 'store_id' => 1, 'customer_id' => $priorId,
+            'customer_email' => 'old@example.test', 'customer_is_guest' => (int)$guest]);
+        $address = $this->createMock(Address::class);
+        $address->expects($rejected ? self::never() : self::once())->method('setEmail')->with('new@example.test');
+        $order->method('getAddresses')->willReturn([$address]);
+        $order->expects($rejected ? self::never() : self::once())->method('addStatusHistoryComment');
+        $orders = $this->createMock(OrderRepository::class);
+        $orders->method('get')->willReturn($order);
+        $orders->expects($rejected ? self::never() : self::once())->method('save')->willReturn($order);
+        $target = $this->createConfiguredMock(CustomerInterface::class, [
+            'getId' => 8, 'getGroupId' => 2, 'getEmail' => 'new@example.test',
+        ]);
+        $provider = $this->createMock(CustomerProvider::class);
+        $provider->method('getCustomerByEmail')->with('new@example.test', 1)
+            ->willReturn($kind === 'existing' ? $target : null);
+        $customers = $this->createMock(CustomerRepositoryInterface::class);
+        if ($kind === 'update') {
+            $customer = $this->createMock(CustomerInterface::class);
+            $customer->expects(self::once())->method('setEmail')->with('new@example.test');
+            $customers->method('getById')->with(7)->willReturn($customer);
+            $customers->expects(self::once())->method('save')->with($customer)->willReturn($customer);
+        } else {
+            $customers->expects(self::never())->method('save');
+        }
+        $creator = $this->createMock(NewCustomerCreator::class);
+        $creator->expects($kind === 'create' ? self::once() : self::never())->method('create')->willReturn($target);
+        $connection = $this->createMock(AdapterInterface::class);
+        $connection->expects($rejected ? self::once() : self::never())->method('rollBack');
+        $connection->expects($rejected ? self::never() : self::once())->method('commit');
+        $resource = $this->createMock(ResourceConnection::class);
+        $resource->method('getConnection')->willReturn($connection);
+        $locks = $this->createMock(LockManagerInterface::class);
+        $locks->method('lock')->willReturn(true);
+        $locks->method('unlock')->willReturn(true);
+        $user = $this->createConfiguredMock(User::class, ['getUserName' => 'admin']);
+        $session = $this->getMockBuilder(Session::class)->disableOriginalConstructor()->addMethods(['getUser'])->getMock();
+        $session->method('getUser')->willReturn($user);
+        $editor = new AdminEmailEditor($provider, $customers, $creator);
+        $controller = new Index($context, $orders, $factory, $validator, $session, $planner,
+            new AdminEmailEditContext(), $editor, $resource, $locks, $this->createMock(CustomerRegistry::class),
+            $this->createMock(LoggerInterface::class));
+        self::assertSame($result, $controller->execute());
+        if (!$rejected) {
+            self::assertSame('new@example.test', $order->getCustomerEmail());
+            self::assertSame($kind === 'update' ? 7 : 8, $order->getCustomerId());
+            self::assertFalse((bool)$order->getCustomerIsGuest());
+        }
+    }
+
+    public static function workflowCases(): array
+    {
+        return [
+            ['existing', false, true, false], ['existing', true, true, false],
+            ['existing', false, false, false], ['existing', true, false, false],
+            ['create', false, false, true], ['create', true, false, false], ['update', false, false, false],
+        ];
+    }
+
     /** @dataProvider failureCases */
     public function testTransactionOutcomes(string $case): void
     {
