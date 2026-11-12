@@ -137,6 +137,7 @@ class IndexTest extends TestCase
         $result = $this->createMock(Json::class);
         $result->expects(self::once())->method('setData')->with(self::callback(
             static fn (array $data): bool => $data['error'] && $data['email'] === '' && !$data['ajaxExpired']
+                && str_contains((string)$data['message'], 'Invalid order or email input')
         ))->willReturnSelf();
         $factory = $this->createMock(JsonFactory::class);
         $factory->method('create')->willReturn($result);
