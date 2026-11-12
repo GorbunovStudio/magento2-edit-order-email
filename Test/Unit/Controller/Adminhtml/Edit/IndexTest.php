@@ -17,6 +17,12 @@ use Magento\Backend\Model\Auth;
 use Magento\Customer\Model\CustomerRegistry;
 use Magento\Customer\Api\CustomerRepositoryInterface;
 use Magento\Customer\Api\Data\CustomerInterface;
+use Magento\Customer\Observer\UpgradeOrderCustomerEmailObserver;
+use Magento\Framework\Api\SearchCriteriaBuilder;
+use Magento\Framework\Api\SearchCriteriaInterface;
+use Magento\Framework\Event;
+use Magento\Framework\Event\Observer;
+use Magento\Sales\Model\ResourceModel\Order\Collection;
 use Magento\Framework\App\Request\Http;
 use Magento\Framework\App\Response\Http as HttpResponse;
 use Magento\Framework\AuthorizationInterface;
@@ -116,11 +122,15 @@ class IndexTest extends TestCase
         $resource = $this->createMock(ResourceConnection::class);
         $resource->method('getConnection')->willReturn($connection);
         $orders = $this->createMock(OrderRepository::class);
-        $orders->expects(self::once())->method('_resetState');
-        $orders->method('get')->willReturnCallback(function () use (&$stored) {
+        $reset = false;
+        $orders->expects(self::once())->method('_resetState')->willReturnCallback(static function () use (&$reset) {
+            $reset = true;
+        });
+        $orders->method('get')->willReturnCallback(function () use (&$stored, &$reset) {
             $order = $this->getMockBuilder(Order::class)->disableOriginalConstructor()
                 ->onlyMethods(['getAddresses', 'addStatusHistoryComment'])->getMock();
-            $order->setData(array_merge(['entity_id' => 42, 'customer_email' => 'old@example.test'], $stored[42]));
+            $flags = $reset ? $stored[42] : ['send_email' => 0, 'email_sent' => 1];
+            $order->setData(array_merge(['entity_id' => 42, 'customer_email' => 'old@example.test'], $flags));
             $order->method('getAddresses')->willReturn([]);
             return $order;
         });
@@ -128,10 +138,31 @@ class IndexTest extends TestCase
             $stored[42] = ['send_email' => $order->getSendEmail(), 'email_sent' => $order->getEmailSent()];
             return $order;
         });
+        $criteria = $this->createMock(SearchCriteriaInterface::class);
+        $builder = $this->createMock(SearchCriteriaBuilder::class);
+        $builder->method('addFilter')->willReturnSelf();
+        $builder->method('create')->willReturn($criteria);
+        $cascadeCollection = $this->createMock(Collection::class);
+        $cascadeCollection->method('setDataToAll')->willReturnSelf();
+        $loadedCascade = [];
+        $cascadeRepository = $this->createMock(OrderRepositoryInterface::class);
+        $cascadeRepository->method('getList')->willReturnCallback(static function () use (&$stored, &$loadedCascade, $cascadeCollection) {
+            $loadedCascade = $stored[1];
+            return $cascadeCollection;
+        });
+        $cascadeCollection->expects(self::once())->method('save')->willReturnCallback(
+            static function () use (&$stored, &$loadedCascade, $cascadeCollection) {
+                $stored[1] = $loadedCascade;
+                return $cascadeCollection;
+            }
+        );
+        $stockObserver = new UpgradeOrderCustomerEmailObserver($cascadeRepository, $builder);
+        $original = $this->createConfiguredMock(CustomerInterface::class, ['getEmail' => 'old@example.test']);
+        $changed = $this->createConfiguredMock(CustomerInterface::class, ['getId' => 7, 'getEmail' => 'new@example.test']);
+        $event = new Event(['orig_customer_data_object' => $original, 'customer_data_object' => $changed]);
         $editor = $this->createMock(AdminEmailEditor::class);
-        $editor->method('apply')->willReturnCallback(static function ($order) use (&$stored) {
-            $cascade = $stored[1];
-            $stored[1] = $cascade;
+        $editor->method('apply')->willReturnCallback(static function ($order) use ($stockObserver, $event) {
+            $stockObserver->execute(new Observer(['event' => $event]));
             $order->setCustomerEmail('new@example.test');
             return false;
         });
