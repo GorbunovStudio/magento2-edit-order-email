@@ -16,6 +16,7 @@ use Magento\Framework\App\ResourceConnection;
 use Magento\Framework\Controller\Result\Json;
 use Magento\Framework\Controller\Result\JsonFactory;
 use Magento\Framework\DB\Adapter\AdapterInterface;
+use Magento\Framework\Exception\NoSuchEntityException;
 use Magento\Framework\Lock\LockManagerInterface;
 use Magento\Framework\Validator\EmailAddress;
 use Magento\Sales\Api\OrderRepositoryInterface;
@@ -73,7 +74,10 @@ class IndexTest extends TestCase
         if ($case === 'commit') {
             $connection->method('commit')->willThrowException(new \RuntimeException('sensitive-detail'));
         }
-        $connection->expects($case === 'unlock' ? self::never() : self::once())->method('rollBack');
+        $rollback = $connection->expects($case === 'unlock' ? self::never() : self::once())->method('rollBack');
+        if ($case === 'rollback') {
+            $rollback->willThrowException(new \RuntimeException('sensitive-detail'));
+        }
         $resource = $this->createMock(ResourceConnection::class);
         $resource->method('getConnection')->willReturn($connection);
         $order = $this->createMock(Order::class);
@@ -84,12 +88,16 @@ class IndexTest extends TestCase
         );
         $order->method('getAddresses')->willReturn([]);
         $orders = $this->createMock(OrderRepository::class);
-        $orders->method('get')->willReturn($order);
-        if ($case === 'save') {
+        if ($case === 'missing') {
+            $orders->method('get')->willThrowException(new NoSuchEntityException(__('Not found')));
+        } else {
+            $orders->method('get')->willReturn($order);
+        }
+        if ($case === 'save' || $case === 'rollback') {
             $orders->method('save')->willThrowException(new \RuntimeException('sensitive-detail'));
         }
         $editor = $this->createMock(AdminEmailEditor::class);
-        $editor->expects(in_array($case, ['stale', 'same'], true) ? self::never() : self::once())
+        $editor->expects(in_array($case, ['stale', 'same', 'missing'], true) ? self::never() : self::once())
             ->method('apply')->willReturn(true);
         $user = $this->createConfiguredMock(User::class, ['getUserName' => 'admin']);
         $session = $this->getMockBuilder(Session::class)->disableOriginalConstructor()->addMethods(['getUser'])->getMock();
@@ -104,7 +112,7 @@ class IndexTest extends TestCase
 
     public static function failureCases(): array
     {
-        return [['stale'], ['same'], ['save'], ['commit'], ['unlock']];
+        return [['stale'], ['same'], ['save'], ['commit'], ['unlock'], ['missing'], ['rollback']];
     }
 
     public function testFailureAfterActivationRollsBackAndClearsContext(): void
