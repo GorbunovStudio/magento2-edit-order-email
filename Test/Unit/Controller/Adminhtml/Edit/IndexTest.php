@@ -29,6 +29,84 @@ require_once __DIR__ . '/../../../../../Controller/Adminhtml/Edit/Index.php';
 
 class IndexTest extends TestCase
 {
+    /** @dataProvider failureCases */
+    public function testTransactionOutcomes(string $case): void
+    {
+        $request = $this->createMock(Http::class);
+        $request->method('getPost')->willReturnCallback(static fn ($key) => [
+            'order_id' => 42, 'email' => 'new@example.test', 'old_email' => 'old@example.test',
+            'create_new_customer' => false, 'assign_to_another_customer' => true,
+        ][$key] ?? null);
+        $context = $this->createMock(Context::class);
+        $context->method('getRequest')->willReturn($request);
+        $result = $this->createMock(Json::class);
+        $result->expects(self::once())->method('setData')->with(self::callback(static function (array $data) use ($case) {
+            if ($case === 'unlock') {
+                return !$data['error'] && $data['email'] === 'new@example.test';
+            }
+            if (!$data['error'] || str_contains((string)$data['message'], 'sensitive-detail')) {
+                return false;
+            }
+            return $case !== 'commit' || str_contains((string)$data['message'], 'could not be confirmed');
+        }))->willReturnSelf();
+        $factory = $this->createMock(JsonFactory::class);
+        $factory->method('create')->willReturn($result);
+        $validator = $this->createMock(EmailAddress::class);
+        $validator->method('isValid')->willReturn(true);
+        $plan = ['customer_id' => 7, 'account_email' => 'old@example.test', 'order_email' => 'old@example.test',
+            'website_id' => 1, 'cascade' => true, 'order_ids' => [1, 42]];
+        $planner = $this->createMock(AdminEmailEditPlan::class);
+        $planner->method('plan')->willReturn($plan);
+        $names = [];
+        $locks = $this->createMock(LockManagerInterface::class);
+        $locks->method('lock')->willReturnCallback(static function ($name) use (&$names) {
+            $names[] = $name;
+            return true;
+        });
+        $locks->expects(self::exactly(2))->method('unlock')->willReturnCallback(static function () use ($case) {
+            if ($case === 'unlock') {
+                throw new \RuntimeException('sensitive-detail');
+            }
+            return true;
+        });
+        $connection = $this->createMock(AdapterInterface::class);
+        if ($case === 'commit') {
+            $connection->method('commit')->willThrowException(new \RuntimeException('sensitive-detail'));
+        }
+        $connection->expects($case === 'unlock' ? self::never() : self::once())->method('rollBack');
+        $resource = $this->createMock(ResourceConnection::class);
+        $resource->method('getConnection')->willReturn($connection);
+        $order = $this->createMock(Order::class);
+        $order->method('getCustomerEmail')->willReturnOnConsecutiveCalls(
+            $case === 'stale' ? 'other@example.test' : 'old@example.test',
+            $case === 'same' ? 'new@example.test' : 'old@example.test',
+            'new@example.test', 'new@example.test'
+        );
+        $order->method('getAddresses')->willReturn([]);
+        $orders = $this->createMock(OrderRepository::class);
+        $orders->method('get')->willReturn($order);
+        if ($case === 'save') {
+            $orders->method('save')->willThrowException(new \RuntimeException('sensitive-detail'));
+        }
+        $editor = $this->createMock(AdminEmailEditor::class);
+        $editor->expects(in_array($case, ['stale', 'same'], true) ? self::never() : self::once())
+            ->method('apply')->willReturn(true);
+        $user = $this->createConfiguredMock(User::class, ['getUserName' => 'admin']);
+        $session = $this->getMockBuilder(Session::class)->disableOriginalConstructor()->addMethods(['getUser'])->getMock();
+        $session->method('getUser')->willReturn($user);
+        $editContext = new AdminEmailEditContext();
+        $controller = new Index($context, $orders, $factory, $validator, $session, $planner, $editContext,
+            $editor, $resource, $locks, $this->createMock(CustomerRegistry::class), $this->createMock(LoggerInterface::class));
+        self::assertSame($result, $controller->execute());
+        self::assertSame(['order_update_1', 'order_update_42'], $names);
+        self::assertFalse($editContext->isActive());
+    }
+
+    public static function failureCases(): array
+    {
+        return [['stale'], ['same'], ['save'], ['commit'], ['unlock']];
+    }
+
     public function testFailureAfterActivationRollsBackAndClearsContext(): void
     {
         $request = $this->createMock(Http::class);
