@@ -292,6 +292,9 @@ class IndexTest extends TestCase
             self::assertSame('new@example.test', $responses[0]['email']);
             self::assertSame('new@example.test', $order->getCustomerEmail());
             self::assertSame($kind === 'update' ? 7 : 8, $order->getCustomerId());
+            if ($kind !== 'update') {
+                self::assertSame(2, $order->getCustomerGroupId());
+            }
             self::assertFalse((bool)$order->getCustomerIsGuest());
             self::assertSame($result, $controller->execute());
             self::assertTrue($responses[1]['error']);
@@ -312,7 +315,8 @@ class IndexTest extends TestCase
     {
         $request = $this->createMock(Http::class);
         $request->method('getPost')->willReturnCallback(static fn ($key) => [
-            'order_id' => 42, 'email' => 'new@example.test', 'old_email' => 'old@example.test',
+            'order_id' => 42, 'email' => $case === 'same' ? 'old@example.test' : 'new@example.test',
+            'old_email' => 'old@example.test',
             'create_new_customer' => false, 'assign_to_another_customer' => true,
         ][$key] ?? null);
         $context = $this->createMock(Context::class);
@@ -324,6 +328,9 @@ class IndexTest extends TestCase
             }
             if (!$data['error'] || str_contains((string)$data['message'], 'sensitive-detail')) {
                 return false;
+            }
+            if ($case === 'same') {
+                return str_contains((string)$data['message'], 'same as the old one');
             }
             return $case !== 'commit' || str_contains((string)$data['message'], 'could not be confirmed');
         }))->willReturnSelf();
@@ -359,13 +366,23 @@ class IndexTest extends TestCase
         $resource = $this->createMock(ResourceConnection::class);
         $resource->method('getConnection')->willReturn($connection);
         $order = $this->createMock(Order::class);
-        $order->method('getCustomerEmail')->willReturnOnConsecutiveCalls(
-            $case === 'stale' ? 'other@example.test' : 'old@example.test',
-            $case === 'same' ? 'new@example.test' : 'old@example.test',
-            'new@example.test', 'new@example.test'
-        );
-        $order->method('getAddresses')->willReturn([]);
+        if ($case === 'same') {
+            $order->method('getCustomerEmail')->willReturn('old@example.test');
+            $order->expects(self::never())->method('addStatusHistoryComment');
+            $order->expects(self::never())->method('getAddresses');
+        } else {
+            $order->method('getCustomerEmail')->willReturnOnConsecutiveCalls(
+                $case === 'stale' ? 'other@example.test' : 'old@example.test',
+                'old@example.test', 'new@example.test', 'new@example.test'
+            );
+        }
+        if ($case !== 'same') {
+            $order->method('getAddresses')->willReturn([]);
+        }
         $orders = $this->createMock(OrderRepository::class);
+        if ($case === 'same') {
+            $orders->expects(self::never())->method('save');
+        }
         if ($case === 'missing') {
             $orders->method('get')->willThrowException(new NoSuchEntityException(__('Not found')));
         } else {
@@ -401,44 +418,6 @@ class IndexTest extends TestCase
     public static function failureCases(): array
     {
         return [['stale'], ['same'], ['save'], ['commit'], ['unlock'], ['missing'], ['rollback']];
-    }
-
-    public function testFailureAfterActivationRollsBackAndClearsContext(): void
-    {
-        $request = $this->createMock(Http::class);
-        $request->method('getPost')->willReturnCallback(static fn ($key) => [
-            'order_id' => 42, 'email' => 'new@example.test', 'old_email' => 'old@example.test',
-            'create_new_customer' => false, 'assign_to_another_customer' => false,
-        ][$key] ?? null);
-        $context = $this->createMock(Context::class);
-        $context->method('getRequest')->willReturn($request);
-        $result = $this->createMock(Json::class);
-        $result->expects(self::once())->method('setData')->with(self::callback(
-            static fn (array $data): bool => $data['error'] && !str_contains((string)$data['message'], 'secret')
-        ))->willReturnSelf();
-        $factory = $this->createMock(JsonFactory::class);
-        $factory->method('create')->willReturn($result);
-        $validator = $this->createMock(EmailAddress::class);
-        $validator->method('isValid')->willReturn(true);
-        $planner = $this->createMock(AdminEmailEditPlan::class);
-        $planner->method('plan')->willReturn(['customer_id' => 7, 'account_email' => 'old@example.test',
-            'order_email' => 'old@example.test', 'website_id' => 1, 'cascade' => false, 'order_ids' => [42]]);
-        $locks = $this->createMock(LockManagerInterface::class);
-        $locks->method('lock')->willReturn(true);
-        $locks->expects(self::once())->method('unlock')->willReturn(true);
-        $connection = $this->createMock(AdapterInterface::class);
-        $connection->expects(self::once())->method('rollBack');
-        $connection->expects(self::never())->method('commit');
-        $resource = $this->createMock(ResourceConnection::class);
-        $resource->method('getConnection')->willReturn($connection);
-        $orders = $this->createMock(OrderRepository::class);
-        $orders->method('get')->willThrowException(new \RuntimeException('secret persistence diagnostic'));
-        $editorContext = new AdminEmailEditContext();
-        $controller = new Index($context, $orders, $factory, $validator, $this->createMock(Session::class),
-            $planner, $editorContext, $this->createMock(AdminEmailEditor::class), $resource, $locks,
-            $this->createMock(CustomerRegistry::class), $this->createMock(LoggerInterface::class));
-        self::assertSame($result, $controller->execute());
-        self::assertFalse($editorContext->isActive());
     }
 
     public function testPartialLockFailureReleasesOnlyAcquiredLocksWithoutStartingTransaction(): void
