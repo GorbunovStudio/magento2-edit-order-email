@@ -29,6 +29,44 @@ require_once __DIR__ . '/../../../../../Controller/Adminhtml/Edit/Index.php';
 
 class IndexTest extends TestCase
 {
+    public function testFailureAfterActivationRollsBackAndClearsContext(): void
+    {
+        $request = $this->createMock(Http::class);
+        $request->method('getPost')->willReturnCallback(static fn ($key) => [
+            'order_id' => 42, 'email' => 'new@example.test', 'old_email' => 'old@example.test',
+            'create_new_customer' => false, 'assign_to_another_customer' => false,
+        ][$key] ?? null);
+        $context = $this->createMock(Context::class);
+        $context->method('getRequest')->willReturn($request);
+        $result = $this->createMock(Json::class);
+        $result->expects(self::once())->method('setData')->with(self::callback(
+            static fn (array $data): bool => $data['error'] && !str_contains((string)$data['message'], 'secret')
+        ))->willReturnSelf();
+        $factory = $this->createMock(JsonFactory::class);
+        $factory->method('create')->willReturn($result);
+        $validator = $this->createMock(EmailAddress::class);
+        $validator->method('isValid')->willReturn(true);
+        $planner = $this->createMock(AdminEmailEditPlan::class);
+        $planner->method('plan')->willReturn(['customer_id' => 7, 'account_email' => 'old@example.test',
+            'order_email' => 'old@example.test', 'website_id' => 1, 'cascade' => false, 'order_ids' => [42]]);
+        $locks = $this->createMock(LockManagerInterface::class);
+        $locks->method('lock')->willReturn(true);
+        $locks->expects(self::once())->method('unlock')->willReturn(true);
+        $connection = $this->createMock(AdapterInterface::class);
+        $connection->expects(self::once())->method('rollBack');
+        $connection->expects(self::never())->method('commit');
+        $resource = $this->createMock(ResourceConnection::class);
+        $resource->method('getConnection')->willReturn($connection);
+        $orders = $this->createMock(OrderRepository::class);
+        $orders->method('get')->willThrowException(new \RuntimeException('secret persistence diagnostic'));
+        $editorContext = new AdminEmailEditContext();
+        $controller = new Index($context, $orders, $factory, $validator, $this->createMock(Session::class),
+            $planner, $editorContext, $this->createMock(AdminEmailEditor::class), $resource, $locks,
+            $this->createMock(CustomerRegistry::class), $this->createMock(LoggerInterface::class));
+        self::assertSame($result, $controller->execute());
+        self::assertFalse($editorContext->isActive());
+    }
+
     public function testPartialLockFailureReleasesOnlyAcquiredLocksWithoutStartingTransaction(): void
     {
         $request = $this->createMock(Http::class);
