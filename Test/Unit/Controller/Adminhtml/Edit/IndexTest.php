@@ -12,10 +12,13 @@ use Budsies\Sales\Service\NewCustomerCreator;
 use MagePal\EditOrderEmail\Controller\Adminhtml\Edit\Index;
 use Magento\Backend\App\Action\Context;
 use Magento\Backend\Model\Auth\Session;
+use Magento\Backend\Model\Auth;
 use Magento\Customer\Model\CustomerRegistry;
 use Magento\Customer\Api\CustomerRepositoryInterface;
 use Magento\Customer\Api\Data\CustomerInterface;
 use Magento\Framework\App\Request\Http;
+use Magento\Framework\App\Response\Http as HttpResponse;
+use Magento\Framework\AuthorizationInterface;
 use Magento\Framework\App\ResourceConnection;
 use Magento\Framework\Controller\Result\Json;
 use Magento\Framework\Controller\Result\JsonFactory;
@@ -23,6 +26,7 @@ use Magento\Framework\DB\Adapter\AdapterInterface;
 use Magento\Framework\Exception\NoSuchEntityException;
 use Magento\Framework\Lock\LockManagerInterface;
 use Magento\Framework\Validator\EmailAddress;
+use Magento\Framework\App\ViewInterface;
 use Magento\Sales\Api\OrderRepositoryInterface;
 use Magento\Sales\Model\Order;
 use Magento\Sales\Model\Order\Address;
@@ -35,6 +39,39 @@ require_once __DIR__ . '/../../../../../Controller/Adminhtml/Edit/Index.php';
 
 class IndexTest extends TestCase
 {
+    public function testDispatchRejectsAdministratorWithoutEditorAcl(): void
+    {
+        $request = $this->createMock(Http::class);
+        $request->method('isDispatched')->willReturn(true);
+        $request->method('getActionName')->willReturn('index');
+        $request->expects(self::once())->method('setDispatched')->with(true);
+        $response = $this->createMock(HttpResponse::class);
+        $response->expects(self::once())->method('setStatusHeader')->with(403, '1.1', 'Forbidden');
+        $authorization = $this->createMock(AuthorizationInterface::class);
+        $authorization->expects(self::once())->method('isAllowed')
+            ->with('MagePal_EditOrderEmail::magepal_editorderemail')->willReturn(false);
+        $auth = $this->createMock(Auth::class);
+        $auth->method('isLoggedIn')->willReturn(true);
+        $view = $this->createMock(ViewInterface::class);
+        $view->expects(self::once())->method('loadLayout');
+        $view->expects(self::once())->method('renderLayout');
+        $context = $this->createMock(Context::class);
+        $context->method('getRequest')->willReturn($request);
+        $context->method('getResponse')->willReturn($response);
+        $context->method('getAuthorization')->willReturn($authorization);
+        $context->method('getAuth')->willReturn($auth);
+        $context->method('getView')->willReturn($view);
+        $planner = $this->createMock(AdminEmailEditPlan::class);
+        $planner->expects(self::never())->method('plan');
+        $controller = new Index($context, $this->createMock(OrderRepositoryInterface::class),
+            $this->createMock(JsonFactory::class), $this->createMock(EmailAddress::class),
+            $this->createMock(Session::class), $planner, new AdminEmailEditContext(),
+            $this->createMock(AdminEmailEditor::class), $this->createMock(ResourceConnection::class),
+            $this->createMock(LockManagerInterface::class), $this->createMock(CustomerRegistry::class),
+            $this->createMock(LoggerInterface::class));
+        self::assertSame($response, $controller->dispatch($request));
+    }
+
     /** @dataProvider workflowCases */
     public function testRealEditorWorkflowThroughController(string $kind, bool $guest, bool $assign, bool $create): void
     {
@@ -47,10 +84,12 @@ class IndexTest extends TestCase
         $context->method('getRequest')->willReturn($request);
         $result = $this->createMock(Json::class);
         $rejected = $kind === 'existing' && !$assign;
-        $result->expects(self::once())->method('setData')->with(self::callback(
-            static fn (array $data): bool => $data['error'] === $rejected
-                && ($rejected || $data['email'] === 'new@example.test') && !$data['ajaxExpired']
-        ))->willReturnSelf();
+        $responses = [];
+        $result->expects($rejected ? self::once() : self::exactly(2))->method('setData')
+            ->willReturnCallback(static function (array $data) use (&$responses, $result) {
+                $responses[] = $data;
+                return $result;
+            });
         $factory = $this->createMock(JsonFactory::class);
         $factory->method('create')->willReturn($result);
         $validator = $this->createMock(EmailAddress::class);
@@ -88,7 +127,7 @@ class IndexTest extends TestCase
         $creator = $this->createMock(NewCustomerCreator::class);
         $creator->expects($kind === 'create' ? self::once() : self::never())->method('create')->willReturn($target);
         $connection = $this->createMock(AdapterInterface::class);
-        $connection->expects($rejected ? self::once() : self::never())->method('rollBack');
+        $connection->expects(self::once())->method('rollBack');
         $connection->expects($rejected ? self::never() : self::once())->method('commit');
         $resource = $this->createMock(ResourceConnection::class);
         $resource->method('getConnection')->willReturn($connection);
@@ -103,10 +142,15 @@ class IndexTest extends TestCase
             new AdminEmailEditContext(), $editor, $resource, $locks, $this->createMock(CustomerRegistry::class),
             $this->createMock(LoggerInterface::class));
         self::assertSame($result, $controller->execute());
+        self::assertSame($rejected, $responses[0]['error']);
+        self::assertFalse($responses[0]['ajaxExpired']);
         if (!$rejected) {
+            self::assertSame('new@example.test', $responses[0]['email']);
             self::assertSame('new@example.test', $order->getCustomerEmail());
             self::assertSame($kind === 'update' ? 7 : 8, $order->getCustomerId());
             self::assertFalse((bool)$order->getCustomerIsGuest());
+            self::assertSame($result, $controller->execute());
+            self::assertTrue($responses[1]['error']);
         }
     }
 
