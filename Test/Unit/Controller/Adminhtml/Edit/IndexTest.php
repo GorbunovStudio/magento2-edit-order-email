@@ -4,112 +4,125 @@ declare(strict_types=1);
 
 namespace MagePal\EditOrderEmail\Test\Unit\Controller\Adminhtml\Edit;
 
-use Budsies\Sales\Service\BindCustomerWithOrders;
-use Budsies\Sales\Service\CustomerProvider;
+use Budsies\Sales\Service\AdminEmailEditContext;
+use Budsies\Sales\Service\AdminEmailEditPlan;
+use Budsies\Sales\Service\AdminEmailEditor;
 use MagePal\EditOrderEmail\Controller\Adminhtml\Edit\Index;
 use Magento\Backend\App\Action\Context;
 use Magento\Backend\Model\Auth\Session;
-use Magento\Customer\Api\AccountManagementInterface;
-use Magento\Customer\Api\CustomerRepositoryInterface;
-use Magento\Customer\Api\Data\CustomerInterface;
+use Magento\Customer\Model\CustomerRegistry;
 use Magento\Framework\App\Request\Http;
+use Magento\Framework\App\ResourceConnection;
 use Magento\Framework\Controller\Result\Json;
 use Magento\Framework\Controller\Result\JsonFactory;
-use Magento\Framework\Event\ManagerInterface;
+use Magento\Framework\DB\Adapter\AdapterInterface;
+use Magento\Framework\Lock\LockManagerInterface;
 use Magento\Framework\Validator\EmailAddress;
-use Magento\Sales\Api\OrderCustomerManagementInterface;
 use Magento\Sales\Api\OrderRepositoryInterface;
 use Magento\Sales\Model\Order;
-use Magento\Store\Api\Data\StoreInterface;
+use Magento\Sales\Model\OrderRepository;
 use Magento\User\Model\User;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
 
+require_once __DIR__ . '/../../../../../Controller/Adminhtml/Edit/Index.php';
+
 class IndexTest extends TestCase
 {
-    public function testExecuteSavesUpdatedOrderWithoutDispatchingEmailChangeEvent(): void
+    public function testEditLocksBeforeTransactionAndSavesWithoutControllerDispatch(): void
     {
-        $oldEmail = 'old@example.com';
-        $newEmail = 'new@example.com';
+        $steps = [];
         $request = $this->createMock(Http::class);
-        $request->method('getPost')->willReturnCallback(static function (string $key) use ($oldEmail, $newEmail) {
-            return [
-                'order_id' => 42,
-                'email' => $newEmail,
-                'old_email' => $oldEmail,
-                'create_new_customer' => false,
-                'assign_to_another_customer' => true,
-            ][$key];
-        });
-
-        $eventManager = $this->createMock(ManagerInterface::class);
-        $eventManager->expects($this->never())->method('dispatch');
-
+        $request->method('getPost')->willReturnCallback(static fn ($key) => [
+            'order_id' => 42, 'email' => 'new@example.test', 'old_email' => 'old@example.test',
+            'create_new_customer' => false, 'assign_to_another_customer' => true,
+        ][$key] ?? null);
         $context = $this->createMock(Context::class);
         $context->method('getRequest')->willReturn($request);
-        $context->method('getEventManager')->willReturn($eventManager);
-
         $result = $this->createMock(Json::class);
-        $result->expects($this->once())
-            ->method('setData')
-            ->with($this->callback(static function (array $data) use ($newEmail): bool {
-                return $data['error'] === false
-                    && $data['email'] === $newEmail
-                    && $data['ajaxExpired'] === false;
-            }))
-            ->willReturnSelf();
-        $resultFactory = $this->createMock(JsonFactory::class);
-        $resultFactory->expects($this->once())->method('create')->willReturn($result);
-
-        $store = $this->createConfiguredMock(StoreInterface::class, ['getWebsiteId' => 1]);
+        $result->expects(self::once())->method('setData')->with(self::callback(
+            static fn (array $data): bool => !$data['error'] && $data['email'] === 'new@example.test'
+        ))->willReturnSelf();
+        $factory = $this->createMock(JsonFactory::class);
+        $factory->method('create')->willReturn($result);
+        $validator = $this->createMock(EmailAddress::class);
+        $validator->method('isValid')->willReturn(true);
+        $plan = ['customer_id' => 7, 'account_email' => 'old@example.test', 'order_email' => 'old@example.test',
+            'website_id' => 1, 'cascade' => false, 'order_ids' => [42]];
+        $planner = $this->createMock(AdminEmailEditPlan::class);
+        $planner->method('plan')->willReturn($plan);
+        $locks = $this->createMock(LockManagerInterface::class);
+        $locks->method('lock')->willReturnCallback(static function () use (&$steps) {
+            $steps[] = 'lock';
+            return true;
+        });
+        $locks->method('unlock')->willReturnCallback(static function () use (&$steps) {
+            $steps[] = 'unlock';
+            return true;
+        });
+        $connection = $this->createMock(AdapterInterface::class);
+        $connection->method('beginTransaction')->willReturnCallback(static function () use (&$steps) {
+            $steps[] = 'begin';
+        });
+        $connection->method('commit')->willReturnCallback(static function () use (&$steps) {
+            $steps[] = 'commit';
+        });
+        $resource = $this->createMock(ResourceConnection::class);
+        $resource->method('getConnection')->willReturn($connection);
         $order = $this->createMock(Order::class);
-        $order->method('getEntityId')->willReturn(42);
-        $order->method('getCustomerEmail')->willReturnOnConsecutiveCalls($oldEmail, $newEmail);
-        $order->method('getStore')->willReturn($store);
-        $order->method('getCustomerId')->willReturn(7);
-        $order->method('getAddressesCollection')->willReturn([]);
-        $order->expects($this->once())->method('addStatusHistoryComment');
-
-        $orderRepository = $this->createMock(OrderRepositoryInterface::class);
-        $orderRepository->expects($this->once())->method('get')->with(42)->willReturn($order);
-        $orderRepository->expects($this->once())->method('save')->with($order)->willReturn($order);
-
-        $existingCustomer = $this->createMock(CustomerInterface::class);
-        $customerProvider = $this->createMock(CustomerProvider::class);
-        $customerProvider->expects($this->once())
-            ->method('getCustomerByEmail')
-            ->with($newEmail, 1)
-            ->willReturn($existingCustomer);
-        $bindCustomerWithOrders = $this->createMock(BindCustomerWithOrders::class);
-        $bindCustomerWithOrders->expects($this->once())
-            ->method('updateCustomerInOrder')
-            ->with($order, $existingCustomer)
-            ->willReturn($order);
-
-        $emailAddressValidator = $this->createMock(EmailAddress::class);
-        $emailAddressValidator->expects($this->once())->method('isValid')->with($newEmail)->willReturn(true);
-
+        $order->method('getCustomerEmail')->willReturnOnConsecutiveCalls('old@example.test', 'old@example.test', 'new@example.test');
+        $order->method('getAddresses')->willReturn([]);
+        $order->expects(self::once())->method('addStatusHistoryComment');
+        $orders = $this->createMock(OrderRepository::class);
+        $orders->method('get')->willReturnCallback(static function () use (&$steps, $order) {
+            $steps[] = 'load';
+            return $order;
+        });
+        $orders->expects(self::once())->method('save')->with($order)->willReturn($order);
+        $editor = $this->createMock(AdminEmailEditor::class);
+        $editor->expects(self::once())->method('apply')->willReturn(true);
         $user = $this->createConfiguredMock(User::class, ['getUserName' => 'admin']);
-        $authSession = $this->getMockBuilder(Session::class)
-            ->disableOriginalConstructor()
-            ->addMethods(['getUser'])
-            ->getMock();
-        $authSession->method('getUser')->willReturn($user);
+        $session = $this->getMockBuilder(Session::class)->disableOriginalConstructor()->addMethods(['getUser'])->getMock();
+        $session->method('getUser')->willReturn($user);
+        $controller = new Index($context, $orders, $factory, $validator, $session, $planner,
+            new AdminEmailEditContext(), $editor, $resource, $locks, $this->createMock(CustomerRegistry::class),
+            $this->createMock(LoggerInterface::class));
+        self::assertSame($result, $controller->execute());
+        self::assertSame(['lock', 'begin', 'load', 'commit', 'unlock'], $steps);
+    }
 
+    public function testInvalidInputDoesNotAcquireALock(): void
+    {
+        $request = $this->createMock(Http::class);
+        $request->method('getPost')->willReturnCallback(static fn ($key) => [
+            'order_id' => 1,
+            'email' => ['invalid'],
+            'old_email' => 'old@example.test',
+        ][$key] ?? null);
+        $context = $this->createMock(Context::class);
+        $context->method('getRequest')->willReturn($request);
+        $result = $this->createMock(Json::class);
+        $result->expects(self::once())->method('setData')->with(self::callback(
+            static fn (array $data): bool => $data['error'] && $data['email'] === '' && !$data['ajaxExpired']
+        ))->willReturnSelf();
+        $factory = $this->createMock(JsonFactory::class);
+        $factory->method('create')->willReturn($result);
+        $locks = $this->createMock(LockManagerInterface::class);
+        $locks->expects(self::never())->method('lock');
         $controller = new Index(
             $context,
-            $orderRepository,
-            $this->createMock(AccountManagementInterface::class),
-            $this->createMock(OrderCustomerManagementInterface::class),
-            $resultFactory,
-            $this->createMock(CustomerRepositoryInterface::class),
-            $emailAddressValidator,
-            $authSession,
-            $customerProvider,
-            $bindCustomerWithOrders,
+            $this->createMock(OrderRepositoryInterface::class),
+            $factory,
+            $this->createMock(EmailAddress::class),
+            $this->createMock(Session::class),
+            $this->createMock(AdminEmailEditPlan::class),
+            new AdminEmailEditContext(),
+            $this->createMock(AdminEmailEditor::class),
+            $this->createMock(ResourceConnection::class),
+            $locks,
+            $this->createMock(CustomerRegistry::class),
             $this->createMock(LoggerInterface::class),
         );
-
         self::assertSame($result, $controller->execute());
     }
 }

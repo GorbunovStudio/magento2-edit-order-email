@@ -1,237 +1,155 @@
 <?php
-/**
- * Copyright © MagePal LLC. All rights reserved.
- * See COPYING.txt for license details.
- * https://www.magepal.com | support@magepal.com
-*/
+
+declare(strict_types=1);
 
 namespace MagePal\EditOrderEmail\Controller\Adminhtml\Edit;
 
-use Exception;
+use Budsies\General\Interface\LockNamePrefixInterface;
+use Budsies\Sales\Service\AdminEmailEditContext;
+use Budsies\Sales\Service\AdminEmailEditPlan;
+use Budsies\Sales\Service\AdminEmailEditor;
+use Budsies\Sales\Service\AdminEmailStaleEditException;
 use Magento\Backend\App\Action;
 use Magento\Backend\App\Action\Context;
 use Magento\Backend\Model\Auth\Session;
-use Magento\Customer\Api\AccountManagementInterface;
-use Magento\Customer\Api\CustomerRepositoryInterface;
-use Magento\Framework\Controller\Result\Json;
+use Magento\Customer\Model\CustomerRegistry;
+use Magento\Framework\App\ResourceConnection;
 use Magento\Framework\Controller\Result\JsonFactory;
+use Magento\Framework\Exception\NoSuchEntityException;
+use Magento\Framework\Lock\LockManagerInterface;
+use Magento\Framework\ObjectManager\ResetAfterRequestInterface;
 use Magento\Framework\Validator\EmailAddress;
-use Magento\Sales\Api\OrderCustomerManagementInterface;
 use Magento\Sales\Api\OrderRepositoryInterface;
-use Budsies\Sales\Service\CustomerProvider;
-use Budsies\Sales\Service\BindCustomerWithOrders;
+use Magento\Sales\Model\Order;
 use Psr\Log\LoggerInterface;
-
+use RuntimeException;
+use Throwable;
 
 class Index extends Action
 {
+    public const ADMIN_RESOURCE = 'MagePal_EditOrderEmail::magepal_editorderemail';
+    private const LOCK_TIMEOUT = 30;
 
-    const ADMIN_RESOURCE = 'MagePal_EditOrderEmail::magepal_editorderemail';
-    /**
-     * @var OrderRepositoryInterface
-     */
-    protected $orderRepository;
-
-    /**
-     * @var AccountManagementInterface
-     */
-    protected $accountManagement;
-
-    /**
-     * @var OrderCustomerManagementInterface
-     */
-    protected $orderCustomerService;
-
-    /**
-     * @var CustomerRepositoryInterface $customerRepository
-     */
-    protected $customerRepository;
-
-    /**
-     * @var JsonFactory
-     */
-    protected $resultJsonFactory;
-    /**
-     * @var EmailAddress
-     */
-    private $emailAddressValidator;
-    /**
-     * @var Session
-     */
-    private $authSession;
-    /**
-     * @var CustomerProvider
-     */
-    private CustomerProvider $customerProvider;
-
-    /**
-     * @var BindCustomerWithOrders
-     */
-    private BindCustomerWithOrders $bindCustomerWithOrders;
-
-    /**
-     * @var LoggerInterface
-     */
-    private LoggerInterface $logger;
-
-    /**
-     * Index constructor.
-     * @param Context $context
-     * @param OrderRepositoryInterface $orderRepository
-     * @param AccountManagementInterface $accountManagement
-     * @param OrderCustomerManagementInterface $orderCustomerService
-     * @param JsonFactory $resultJsonFactory
-     * @param CustomerRepositoryInterface $customerRepository
-     * @param EmailAddress $emailAddressValidator
-     * @param Session $authSession
-     * @param CustomerProvider $customerProvider
-     * @param BindCustomerWithOrders $bindCustomerWithOrders
-     * @param LoggerInterface $logger
-     */
     public function __construct(
         Context $context,
-        OrderRepositoryInterface $orderRepository,
-        AccountManagementInterface $accountManagement,
-        OrderCustomerManagementInterface $orderCustomerService,
-        JsonFactory $resultJsonFactory,
-        CustomerRepositoryInterface $customerRepository,
-        EmailAddress $emailAddressValidator,
-        Session $authSession,
-        CustomerProvider $customerProvider,
-        BindCustomerWithOrders $bindCustomerWithOrders,
-        LoggerInterface $logger,
+        private OrderRepositoryInterface $orders,
+        private JsonFactory $jsonFactory,
+        private EmailAddress $validator,
+        private Session $authSession,
+        private AdminEmailEditPlan $planner,
+        private AdminEmailEditContext $editContext,
+        private AdminEmailEditor $editor,
+        private ResourceConnection $resource,
+        private LockManagerInterface $locks,
+        private CustomerRegistry $customerRegistry,
+        private LoggerInterface $logger,
     ) {
         parent::__construct($context);
-
-        $this->orderRepository = $orderRepository;
-        $this->orderCustomerService = $orderCustomerService;
-        $this->resultJsonFactory = $resultJsonFactory;
-        $this->accountManagement = $accountManagement;
-        $this->customerRepository = $customerRepository;
-        $this->emailAddressValidator = $emailAddressValidator;
-        $this->authSession = $authSession;
-        $this->customerProvider = $customerProvider;
-        $this->bindCustomerWithOrders = $bindCustomerWithOrders;
-        $this->logger = $logger;
     }
 
-    /**
-     * Index action
-     * @return Json
-     * @throws Exception
-     */
     public function execute()
     {
         $request = $this->getRequest();
-        $orderId = $request->getPost('order_id');
-        $emailAddress = trim($request->getPost('email'));
-        $oldEmailAddress = $request->getPost('old_email');
-        $createNewCustomerRecord = $request->getPost('create_new_customer');
-        $assignToAnotherCustomerRecord = $request->getPost('assign_to_another_customer');
-        $resultJson = $this->resultJsonFactory->create();
+        $id = filter_var($request->getPost('order_id'), FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+        $email = $request->getPost('email');
+        $oldEmail = $request->getPost('old_email');
+        $result = ['error' => true, 'message' => __('Unable to edit the order email.'), 'email' => '', 'ajaxExpired' => false];
+        $acquired = [];
+        $started = false;
+        $committing = false;
+        $committed = false;
 
-        $this->logger->info(sprintf(
-            '35954 - MagePal - Action started. OrderId: %s, email: %s',
-            (string)$orderId,
-            (string)$emailAddress
-        ));
-
-        if (!isset($orderId)) {
-            return $resultJson->setData([
-                'error' => true,
-                'message' => __('Invalid order id.'),
-                'email' => '',
-                'ajaxExpired' => false
-            ]);
-        }
-        if (!$this->emailAddressValidator->isValid($emailAddress)) {
-            return $resultJson->setData([
-                'error' => true,
-                'message' => __('Invalid Email address.'),
-                'email' => '',
-                'ajaxExpired' => false
-            ]);
-        }
         try {
-            $order = $this->orderRepository->get($orderId);
-
-            if (!$order->getEntityId() || $order->getCustomerEmail() != $oldEmailAddress) {
-                throw new \Exception(__('Order not found or email mismatch.'));
+            if (!is_int($id) || !is_string($email) || !is_string($oldEmail)) {
+                throw new AdminEmailStaleEditException('Invalid order or email input.');
             }
-
-            if ($emailAddress == $oldEmailAddress) {
-                return $resultJson->setData([
-                    'error' => true,
-                    'message' => __('Email address is the same as the old one.'),
-                    'email' => $emailAddress,
-                    'ajaxExpired' => false
-                ]);
+            $email = trim($email);
+            if (!$this->validator->isValid($email)) {
+                throw new AdminEmailStaleEditException('Invalid Email address.');
             }
-
-            $websiteId = $order->getStore()->getWebsiteId();
-            $customerForNewEmail = $this->customerProvider->getCustomerByEmail($emailAddress, $websiteId);
-            $hasOrderCustomer = $order->getCustomerId() ? true : false;
-
-            if ($customerForNewEmail) {
-                    if ($assignToAnotherCustomerRecord) {
-                        $order = $this->bindCustomerWithOrders->updateCustomerInOrder($order, $customerForNewEmail);
-                    } else {
-                        return $resultJson->setData([
-                            'error' => true,
-                            'message' => __('Customer with this email already exists. Please set the checkbox if you want to re-assign the order to that customer.'),
-                            'email' => '',
-                            'ajaxExpired' => false
-                        ]);
-                    }
-            } else {
-                if ($hasOrderCustomer && !$createNewCustomerRecord) {
-                    $customerFromOrder = $this->customerRepository->getById($order->getCustomerId());
-                    if (!$customerFromOrder) {
-                        throw new \Exception(__('Customer with email address "'. $oldEmailAddress .'" not found.'));
-                    }
-
-                    $customerFromOrder->setEmail($emailAddress);
-                    $this->customerRepository->save($customerFromOrder);
-
-                    $order->setCustomerEmail($emailAddress);
-                } else {
-                    $order = $this->bindCustomerWithOrders->createNewCustomerAndBindWithOrder($order, $emailAddress);
+            $create = (bool)$request->getPost('create_new_customer');
+            $assign = (bool)$request->getPost('assign_to_another_customer');
+            $plan = $this->planner->plan($id, $email, $create);
+            foreach ($plan['order_ids'] as $orderId) {
+                $lock = LockNamePrefixInterface::ORDER_UPDATE . $orderId;
+                if (!$this->locks->lock($lock, self::LOCK_TIMEOUT)) {
+                    throw new AdminEmailStaleEditException('The order is busy. Please try again.');
                 }
+                $acquired[] = $lock;
             }
-
+            $this->editContext->activate($plan['order_ids'], $plan['customer_id'], $plan['account_email']);
+            $connection = $this->resource->getConnection();
+            $connection->beginTransaction();
+            $started = true;
+            if (!$this->orders instanceof ResetAfterRequestInterface) {
+                throw new RuntimeException('Order repository does not support reset.');
+            }
+            $this->orders->_resetState();
+            $this->customerRegistry->_resetState();
+            $order = $this->orders->get($id);
+            if (!$order instanceof Order) {
+                throw new RuntimeException('Unexpected order implementation.');
+            }
+            $current = $this->planner->plan($id, $email, $create);
+            if ($order->getCustomerEmail() != $oldEmail || $current['order_email'] !== $plan['order_email']
+                || $current['customer_id'] !== $plan['customer_id'] || $current['account_email'] !== $plan['account_email']
+                || $current['website_id'] !== $plan['website_id'] || $current['cascade'] !== $plan['cascade']
+                || array_diff($current['order_ids'], $plan['order_ids']) !== []
+            ) {
+                throw new AdminEmailStaleEditException('The order changed. Refresh and try again.');
+            }
+            if ($email == $order->getCustomerEmail()) {
+                throw new AdminEmailStaleEditException('Email address is the same as the old one.');
+            }
+            $reassigned = $this->editor->apply($order, $email, $plan['website_id'], $create, $assign);
             $comment = sprintf(
-                __('Order email address change from %s to %s by %s'),
-                $oldEmailAddress,
-                $emailAddress,
+                (string)__('Order email address change from %s to %s by %s'),
+                $oldEmail,
+                $email,
                 $this->authSession->getUser()->getUserName()
             );
             $order->addStatusHistoryComment($comment);
-            $this->orderRepository->save($order);
-
-            $email = $order->getCustomerEmail();
-            foreach ($order->getAddressesCollection() as $address) {
-                $address->setEmail($email)->save();
+            foreach ($order->getAddresses() as $address) {
+                $address->setEmail($order->getCustomerEmail());
             }
-
-            $this->logger->info(sprintf(
-                '35954 - MagePal - Action finished. OrderId: %s, email: %s, old email: %s',
-                (string)$order->getEntityId(),
-                (string)$email,
-                (string)$oldEmailAddress
-            ));
-            return $resultJson->setData([
+            $this->orders->save($order);
+            $committing = true;
+            $connection->commit();
+            $committing = false;
+            $committed = true;
+            $result = [
                 'error' => false,
-                'message' => __('Email address successfully changed.'),
-                'email' => $email,
-                'ajaxExpired' => false
-            ]);
-        } catch (\Exception $e) {
-            return $resultJson->setData([
-                'error' => true,
-                'message' => $e->getMessage(),
-                'email' => '',
-                'ajaxExpired' => false
-            ]);
+                'message' => $reassigned ? __('Order reassigned to the existing customer.') : __('Email address successfully changed.'),
+                'email' => $order->getCustomerEmail(),
+                'ajaxExpired' => false,
+            ];
+        } catch (Throwable $error) {
+            if ($started && !$committed) {
+                try {
+                    $this->resource->getConnection()->rollBack();
+                } catch (Throwable $rollbackError) {
+                    $this->logger->error('Admin email edit rollback failed', ['order_id' => $id, 'type' => $rollbackError::class]);
+                }
+            }
+            if ($committing) {
+                $result['message'] = __('The result could not be confirmed. Refresh before editing again.');
+            } elseif ($error instanceof AdminEmailStaleEditException || $error instanceof NoSuchEntityException) {
+                $result['message'] = $error instanceof NoSuchEntityException ? __('Order not found.') : $error->getMessage();
+            } else {
+                $this->logger->error('Admin email edit failed', ['order_id' => $id, 'type' => $error::class]);
+            }
+        } finally {
+            $this->editContext->_resetState();
+            foreach (array_reverse($acquired) as $lock) {
+                try {
+                    if (!$this->locks->unlock($lock)) {
+                        throw new RuntimeException('Lock release failed.');
+                    }
+                } catch (Throwable $error) {
+                    $this->logger->error('Admin email edit lock cleanup failed', ['order_id' => $id, 'type' => $error::class]);
+                }
+            }
         }
+        return $this->jsonFactory->create()->setData($result);
     }
 }
