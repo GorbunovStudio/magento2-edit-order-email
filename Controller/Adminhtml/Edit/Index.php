@@ -55,8 +55,7 @@ class Index extends Action
     {
         $result = $this->resultJsonFactory->create();
         $orderId = null;
-        $locked = false;
-        $lockName = '';
+        $acquiredLocks = [];
         $started = false;
         $connection = null;
         $initialLevel = 0;
@@ -86,12 +85,33 @@ class Index extends Action
             if (!is_string($oldEmail)) {
                 throw new ValidationException(__('Order not found or email mismatch.'));
             }
-            $lockName = LockNamePrefixInterface::ORDER_UPDATE . $orderId;
-            $locked = $this->lockManager->lock($lockName, self::LOCK_TIMEOUT);
-            if (!$locked) {
+            $connection = $this->resourceConnection->getConnection();
+            $select = $connection->select()->from($this->resourceConnection->getTableName('sales_order'), ['customer_id'])
+                ->where('entity_id = ?', $orderId);
+            $discoveredCustomerId = (int)$connection->fetchOne($select);
+            $orderIds = [$orderId];
+            if ($discoveredCustomerId && !$request->getPost('create_new_customer')) {
+                $select = $connection->select()->from($this->resourceConnection->getTableName('customer_entity'), ['email'])
+                    ->where('entity_id = ?', $discoveredCustomerId);
+                $accountEmail = $connection->fetchOne($select);
+                if ($accountEmail !== false) {
+                    $select = $connection->select()->from($this->resourceConnection->getTableName('sales_order'), ['entity_id'])
+                        ->where('customer_id = ?', $discoveredCustomerId)->where('customer_email = ?', $accountEmail);
+                    $orderIds = array_merge($orderIds, array_map('intval', $connection->fetchCol($select)));
+                }
+            }
+            $orderIds = array_unique($orderIds);
+            sort($orderIds, SORT_NUMERIC);
+            foreach ($orderIds as $id) {
+                $lockName = LockNamePrefixInterface::ORDER_UPDATE . $id;
+                if (!$this->lockManager->lock($lockName, self::LOCK_TIMEOUT)) {
+                    break;
+                }
+                $acquiredLocks[] = $lockName;
+            }
+            if (count($acquiredLocks) !== count($orderIds)) {
                 $response['message'] = __('Unable to change the email address right now. Please try again.');
             } else {
-                $connection = $this->resourceConnection->getConnection();
                 $initialLevel = $connection->getTransactionLevel();
                 $connection->beginTransaction();
                 $started = true;
@@ -117,6 +137,9 @@ class Index extends Action
                     }
                     $this->assignCustomer($order, $customer);
                 } elseif ($order->getCustomerId() && !$request->getPost('create_new_customer')) {
+                    if ((int)$order->getCustomerId() !== $discoveredCustomerId) {
+                        throw new ValidationException(__('Order not found or email mismatch.'));
+                    }
                     $customer = $this->customerRepository->getById($order->getCustomerId());
                     $customer->setEmail($email);
                     $this->customerRepository->save($customer);
@@ -176,7 +199,7 @@ class Index extends Action
                 $this->logger->error('Edit order email failed.', ['order_id' => $orderId, 'type' => get_class($e)]);
             }
         } finally {
-            if ($locked) {
+            foreach (array_reverse($acquiredLocks) as $lockName) {
                 try {
                     $this->lockManager->unlock($lockName);
                 } catch (Throwable $cleanupError) {

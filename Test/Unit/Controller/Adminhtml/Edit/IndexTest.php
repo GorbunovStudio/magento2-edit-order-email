@@ -17,6 +17,7 @@ use Magento\Framework\App\ResourceConnection;
 use Magento\Framework\Controller\Result\Json;
 use Magento\Framework\Controller\Result\JsonFactory;
 use Magento\Framework\DB\Adapter\AdapterInterface;
+use Magento\Framework\DB\Select;
 use Magento\Framework\Escaper;
 use Magento\Framework\Event\ManagerInterface;
 use Magento\Framework\Exception\AlreadyExistsException;
@@ -190,6 +191,79 @@ class IndexTest extends TestCase
         self::assertSame(['lock'], $trace);
     }
 
+    public function testMultipleLocksAreOrderedAndReleasedAfterCommit(): void
+    {
+        [$response, $trace] = $this->runAction(['peers' => [42, 8, 3], 'traceLocks' => true]);
+        self::assertFalse($response['error']);
+        self::assertSame([
+            'lock:3', 'lock:8', 'lock:42', 'begin', 'load', 'customer-save', 'save', 'commit',
+            'unlock:42', 'unlock:8', 'unlock:3',
+        ], $trace);
+    }
+
+    public function testPeerAcquisitionFailureAndCleanup(): void
+    {
+        foreach ([['timeoutAt' => 8], ['lockFailureAt' => 8], ['timeoutAt' => 42]] as $failure) {
+            [$response, $trace] = $this->runAction($failure + ['peers' => [3, 8, 42], 'traceLocks' => true]);
+            self::assertTrue($response['error']);
+            self::assertNotContains('begin', $trace);
+            self::assertNotContains('load', $trace);
+            self::assertSame('unlock:3', end($trace));
+        }
+    }
+
+    public function testChangedSelectedCustomerLinkRejectsOnlyExistingAccountUpdate(): void
+    {
+        foreach ([0, 12] as $discoveredId) {
+            [$response, $trace] = $this->runAction(['discoveredId' => $discoveredId]);
+            self::assertTrue($response['error']);
+            self::assertStringContainsString('Order not found or email mismatch.', $response['message']);
+            self::assertNotContains('customer-save', $trace);
+            self::assertSame(['lock', 'begin', 'load', 'rollback', 'unlock'], $trace);
+        }
+        foreach ([['existing' => true, 'assign' => true], ['create' => true]] as $choice) {
+            [$response] = $this->runAction($choice + ['discoveredId' => 12]);
+            self::assertFalse($response['error']);
+        }
+    }
+
+    public function testUnlockFailureDoesNotPreventRemainingReleases(): void
+    {
+        [$response, $trace] = $this->runAction([
+            'peers' => [3, 8, 42], 'traceLocks' => true, 'unlockFailureAt' => 8,
+        ]);
+        self::assertFalse($response['error']);
+        self::assertSame(['unlock:42', 'unlock:8', 'unlock:3'], array_slice($trace, -3));
+    }
+
+    public function testAllLocksRemainHeldThroughNestedRollbackAndFailedBegin(): void
+    {
+        [$response, $trace] = $this->runAction([
+            'peers' => [3, 8], 'traceLocks' => true, 'failure' => new Error('nested'), 'nested' => true,
+        ]);
+        self::assertTrue($response['error']);
+        self::assertSame([
+            'lock:3', 'lock:8', 'lock:42', 'begin', 'load', 'customer-save', 'rollback', 'rollback',
+            'unlock:42', 'unlock:8', 'unlock:3',
+        ], $trace);
+        [$response, $trace] = $this->runAction(['peers' => [3, 8], 'traceLocks' => true, 'beginFailure' => true]);
+        self::assertTrue($response['error']);
+        self::assertSame(['lock:3', 'lock:8', 'lock:42', 'begin', 'unlock:42', 'unlock:8', 'unlock:3'], $trace);
+    }
+
+    public function testDiscoveryUsesAccountEmailAndLocksPeersBeforeReassignment(): void
+    {
+        [$response, $trace] = $this->runAction([
+            'peers' => [3, 42], 'traceLocks' => true, 'existing' => true, 'assign' => true, 'traceDiscovery' => true,
+        ]);
+        self::assertFalse($response['error']);
+        self::assertSame([
+            'from:sales_order', 'where:entity_id = ?:42', 'from:customer_entity', 'where:entity_id = ?:7',
+            'from:sales_order', 'where:customer_id = ?:7', 'where:customer_email = ?:account@example.com',
+            'lock:3', 'lock:42', 'begin', 'load', 'target-lookup', 'save', 'commit', 'unlock:42', 'unlock:3',
+        ], $trace);
+    }
+
     /**
      * @param mixed[] $options
      * @return mixed[]
@@ -270,7 +344,12 @@ class IndexTest extends TestCase
             'getId' => 99, 'getGroupId' => 3, 'getEmail' => 'new@example.com',
         ]);
         $provider = $this->createMock(CustomerProvider::class);
-        $provider->method('getCustomerByEmail')->willReturn(!empty($options['existing']) ? $customer : null);
+        $provider->method('getCustomerByEmail')->willReturnCallback(static function () use (&$trace, $options, $customer) {
+            if (!empty($options['traceDiscovery'])) {
+                $trace[] = 'target-lookup';
+            }
+            return !empty($options['existing']) ? $customer : null;
+        });
         $creator = $this->createMock(NewCustomerCreator::class);
         $creator->method('create')->willReturnCallback(static function () use (&$trace, $customer, $order, $options) {
             $trace[] = 'create';
@@ -304,22 +383,42 @@ class IndexTest extends TestCase
         $session->method('getUser')->willReturn($user);
         $lock = $this->createMock(LockManagerInterface::class);
         $lock->method('lock')->willReturnCallback(static function ($name, $timeout) use (&$trace, $options) {
-            self::assertSame('order_update_42', $name);
+            $id = (int)substr($name, strlen('order_update_'));
             self::assertSame(30, $timeout);
-            $trace[] = 'lock';
-            if (!empty($options['lockFailure'])) {
+            $trace[] = !empty($options['traceLocks']) ? 'lock:' . $id : 'lock';
+            if (!empty($options['lockFailure']) || ($options['lockFailureAt'] ?? null) === $id) {
                 throw new RuntimeException('Lock failure');
             }
-            return empty($options['timeout']);
+            return empty($options['timeout']) && ($options['timeoutAt'] ?? null) !== $id;
         });
-        $lock->method('unlock')->willReturnCallback(static function () use (&$trace, $options) {
-            $trace[] = 'unlock';
-            if (!empty($options['unlockFailure'])) {
+        $lock->method('unlock')->willReturnCallback(static function ($name) use (&$trace, $options) {
+            $id = (int)substr($name, strlen('order_update_'));
+            $trace[] = !empty($options['traceLocks']) ? 'unlock:' . $id : 'unlock';
+            if (!empty($options['unlockFailure']) || ($options['unlockFailureAt'] ?? null) === $id) {
                 throw new RuntimeException();
             }
             return true;
         });
         $connection = $this->createMock(AdapterInterface::class);
+        $select = $this->getMockBuilder(Select::class)->disableOriginalConstructor()->getMock();
+        $select->method('from')->willReturnCallback(static function ($name) use ($select, &$trace, $options) {
+            if (!empty($options['traceDiscovery'])) {
+                $trace[] = 'from:' . $name;
+            }
+            return $select;
+        });
+        $select->method('where')->willReturnCallback(static function ($condition, $value) use ($select, &$trace, $options) {
+            if (!empty($options['traceDiscovery'])) {
+                $trace[] = 'where:' . $condition . ':' . $value;
+            }
+            return $select;
+        });
+        $connection->method('select')->willReturn($select);
+        $connection->method('fetchOne')->willReturnOnConsecutiveCalls(
+            $options['discoveredId'] ?? ($options['customerId'] ?? 7),
+            'account@example.com'
+        );
+        $connection->method('fetchCol')->willReturn($options['peers'] ?? []);
         $connection->method('getTransactionLevel')->willReturnCallback(static function () use (&$level) {
             return $level;
         });
@@ -356,6 +455,7 @@ class IndexTest extends TestCase
         });
         $resource = $this->createMock(ResourceConnection::class);
         $resource->method('getConnection')->willReturn($connection);
+        $resource->method('getTableName')->willReturnCallback(static fn ($name) => $name);
         $controller = new Index(
             $context,
             $repository,
