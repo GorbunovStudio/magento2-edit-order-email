@@ -223,6 +223,13 @@ class IndexTest extends TestCase
             self::assertNotContains('customer-save', $trace);
             self::assertSame(['lock', 'begin', 'load', 'rollback', 'unlock'], $trace);
         }
+        [$response, $trace] = $this->runAction([
+            'discoveredId' => 12, 'peers' => [3, 8], 'traceLocks' => true,
+        ]);
+        self::assertTrue($response['error']);
+        self::assertSame([
+            'lock:3', 'lock:8', 'lock:42', 'begin', 'load', 'rollback', 'unlock:42', 'unlock:8', 'unlock:3',
+        ], $trace);
         foreach ([['existing' => true, 'assign' => true], ['create' => true]] as $choice) {
             [$response] = $this->runAction($choice + ['discoveredId' => 12]);
             self::assertFalse($response['error']);
