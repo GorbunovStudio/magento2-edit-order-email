@@ -60,7 +60,12 @@ class Index extends Action
         $started = false;
         $connection = null;
         $initialLevel = 0;
-        $response = ['error' => true, 'message' => __('Unable to change the email address.'), 'email' => '', 'ajaxExpired' => false];
+        $response = [
+            'error' => true,
+            'message' => __('Unable to change the email address.'),
+            'email' => '',
+            'ajaxExpired' => false,
+        ];
 
         try {
             $request = $this->getRequest();
@@ -105,7 +110,10 @@ class Index extends Action
                 $customer = $this->customerProvider->getCustomerByEmail($email, $websiteId);
                 if ($customer) {
                     if (!$request->getPost('assign_to_another_customer')) {
-                        throw new ValidationException(__('Customer with this email already exists. Please set the checkbox if you want to re-assign the order to that customer.'));
+                        throw new ValidationException(__(
+                            'Customer with this email already exists. Please set the checkbox if you want to ' .
+                            're-assign the order to that customer.'
+                        ));
                     }
                     $this->assignCustomer($order, $customer);
                 } elseif ($order->getCustomerId() && !$request->getPost('create_new_customer')) {
@@ -133,7 +141,12 @@ class Index extends Action
                 $this->orderRepository->save($order);
                 $connection->commit();
                 $started = false;
-                $response = ['error' => false, 'message' => __('Email address successfully changed.'), 'email' => $email, 'ajaxExpired' => false];
+                $response = [
+                    'error' => false,
+                    'message' => __('Email address successfully changed.'),
+                    'email' => $email,
+                    'ajaxExpired' => false,
+                ];
             }
         } catch (Throwable $e) {
             if ($started && $connection !== null) {
@@ -142,21 +155,28 @@ class Index extends Action
                         $connection->rollBack();
                     }
                 } catch (Throwable $cleanupError) {
-                    $this->logger->error('Edit order email rollback failed.', ['order_id' => $orderId, 'type' => get_class($cleanupError)]);
+                    $this->logger->error('Edit order email rollback failed.', [
+                        'order_id' => $orderId, 'type' => get_class($cleanupError),
+                    ]);
                 }
             }
-            if (($e instanceof InputException || $e instanceof ValidationException || $e instanceof InputMismatchException || $e instanceof AlreadyExistsException) && !$e->getPrevious()) {
+            if (($e instanceof InputException || $e instanceof ValidationException
+                || $e instanceof InputMismatchException || $e instanceof AlreadyExistsException) && !$e->getPrevious()
+            ) {
                 $messages = [];
                 if ($e instanceof InputException || $e instanceof ValidationException) {
                     foreach ($e->getErrors() as $error) {
                         if ($error->getPrevious()) {
-                            $this->logger->error('Edit order email validation failed.', ['order_id' => $orderId, 'type' => get_class($error)]);
+                            $this->logger->error('Edit order email validation failed.', [
+                                'order_id' => $orderId, 'type' => get_class($error),
+                            ]);
                             return $result->setData($response);
                         }
                         $messages[] = $error->getMessage();
                     }
                 }
-                $response['message'] = $this->escaper->escapeHtml($messages ? implode(' ', $messages) : $e->getMessage());
+                $message = $messages ? implode(' ', $messages) : $e->getMessage();
+                $response['message'] = $this->escaper->escapeHtml($message);
             } else {
                 $this->logger->error('Edit order email failed.', ['order_id' => $orderId, 'type' => get_class($e)]);
             }
@@ -165,7 +185,9 @@ class Index extends Action
                 try {
                     $this->lockManager->unlock($lockName);
                 } catch (Throwable $cleanupError) {
-                    $this->logger->error('Edit order email unlock failed.', ['order_id' => $orderId, 'type' => get_class($cleanupError)]);
+                    $this->logger->error('Edit order email unlock failed.', [
+                        'order_id' => $orderId, 'type' => get_class($cleanupError),
+                    ]);
                 }
             }
         }
@@ -175,9 +197,14 @@ class Index extends Action
 
     private function assignCustomer(OrderInterface $order, CustomerInterface $customer): void
     {
+        $customerId = $customer->getId();
+        $groupId = $customer->getGroupId();
+        if ($customerId === null || $groupId === null) {
+            throw new RuntimeException('Customer ID or group is missing.');
+        }
         $order->setCustomerEmail($customer->getEmail());
-        $order->setCustomerId($customer->getId());
-        $order->setCustomerGroupId($customer->getGroupId());
+        $order->setCustomerId($customerId);
+        $order->setCustomerGroupId($groupId);
         $order->setCustomerIsGuest(0);
     }
 }

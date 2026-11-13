@@ -40,7 +40,9 @@ class IndexTest extends TestCase
     public function testExistingCustomerAssignmentForGuestAndRegisteredOrders(): void
     {
         foreach ([0, 7] as $customerId) {
-            [$response, $trace, $order] = $this->runAction(['customerId' => $customerId, 'existing' => true, 'assign' => true]);
+            [$response, $trace, $order] = $this->runAction([
+                'customerId' => $customerId, 'existing' => true, 'assign' => true,
+            ]);
             self::assertFalse($response['error']);
             self::assertSame('new@example.com', $response['email']);
             self::assertSame(99, $order->getCustomerId());
@@ -65,7 +67,9 @@ class IndexTest extends TestCase
     public function testCreationForGuestAndRegisteredOrders(): void
     {
         foreach ([0, 7] as $customerId) {
-            [$response, $trace, $order] = $this->runAction(['customerId' => $customerId, 'create' => $customerId !== 0]);
+            [$response, $trace, $order] = $this->runAction([
+                'customerId' => $customerId, 'create' => $customerId !== 0,
+            ]);
             self::assertFalse($response['error']);
             self::assertSame(99, $order->getCustomerId());
             self::assertSame(3, $order->getCustomerGroupId());
@@ -89,7 +93,8 @@ class IndexTest extends TestCase
     {
         foreach ([
             [['invalid' => true], 'Invalid Email address.', []],
-            [['same' => true], 'Email address is the same as the old one.', ['lock', 'begin', 'load', 'rollback', 'unlock']],
+            [['same' => true], 'Email address is the same as the old one.',
+                ['lock', 'begin', 'load', 'rollback', 'unlock']],
             [['stale' => true], 'Order not found or email mismatch.', ['lock', 'begin', 'load', 'rollback', 'unlock']],
             [['timeout' => true], 'Please try again.', ['lock']],
         ] as [$options, $message, $expectedTrace]) {
@@ -114,6 +119,11 @@ class IndexTest extends TestCase
             [$response, $trace] = $this->runAction(['failure' => $exception]);
             self::assertTrue($response['error']);
             self::assertStringContainsString($message, $response['message']);
+            self::assertSame('', $response['email']);
+            self::assertFalse($response['ajaxExpired']);
+            if ($exception === $aggregate) {
+                self::assertStringContainsString('Name is required', $response['message']);
+            }
             self::assertSame(['lock', 'begin', 'load', 'customer-save', 'rollback', 'unlock'], $trace);
         }
     }
@@ -144,13 +154,26 @@ class IndexTest extends TestCase
 
     public function testCreationValidationAndBeginFailure(): void
     {
-        [$response, $trace] = $this->runAction(['create' => true, 'creationFailure' => new InputMismatchException(new Phrase('Email already exists'))]);
+        [$response, $trace] = $this->runAction([
+            'create' => true, 'creationFailure' => new InputMismatchException(new Phrase('Email already exists')),
+        ]);
         self::assertTrue($response['error']);
         self::assertSame('Email already exists', $response['message']);
         self::assertSame(['lock', 'begin', 'load', 'create', 'rollback', 'unlock'], $trace);
         [$response, $trace] = $this->runAction(['beginFailure' => true]);
         self::assertTrue($response['error']);
         self::assertSame(['lock', 'begin', 'unlock'], $trace);
+    }
+
+    public function testCommitFailureAndLockException(): void
+    {
+        [$response, $trace] = $this->runAction(['commitFailure' => true]);
+        self::assertTrue($response['error']);
+        self::assertSame('', $response['email']);
+        self::assertSame(['lock', 'begin', 'load', 'customer-save', 'save', 'commit', 'rollback', 'unlock'], $trace);
+        [$response, $trace] = $this->runAction(['lockFailure' => true]);
+        self::assertTrue($response['error']);
+        self::assertSame(['lock'], $trace);
     }
 
     /**
@@ -184,10 +207,19 @@ class IndexTest extends TestCase
         $factory->method('create')->willReturn($result);
         $store = $this->createConfiguredMock(StoreInterface::class, ['getWebsiteId' => 1]);
         $address = $this->getMockBuilder(Address::class)->disableOriginalConstructor()->onlyMethods([])->getMock();
-        $order = $this->getMockBuilder(Order::class)->disableOriginalConstructor()->onlyMethods(['getStore', 'getAddresses', 'addStatusHistoryComment'])->getMock();
-        $order->setData(['entity_id' => 42, 'customer_id' => $options['customerId'] ?? 7, 'customer_email' => !empty($options['stale']) ? 'other@example.com' : 'old@example.com', 'store_id' => 1, 'unrelated' => 'unchanged']);
+        $shippingAddress = $this->getMockBuilder(Address::class)
+            ->disableOriginalConstructor()->onlyMethods([])->getMock();
+        $order = $this->getMockBuilder(Order::class)->disableOriginalConstructor()
+            ->onlyMethods(['getStore', 'getAddresses', 'addStatusHistoryComment'])->getMock();
+        $order->setData([
+            'entity_id' => 42,
+            'customer_id' => $options['customerId'] ?? 7,
+            'customer_email' => !empty($options['stale']) ? 'other@example.com' : 'old@example.com',
+            'store_id' => 1,
+            'unrelated' => 'unchanged',
+        ]);
         $order->method('getStore')->willReturn($store);
-        $order->method('getAddresses')->willReturn([$address]);
+        $order->method('getAddresses')->willReturn([$address, $shippingAddress]);
         $order->method('addStatusHistoryComment')->willReturnCallback(static function ($comment) use ($order) {
             self::assertSame('Order email address change from old@example.com to new@example.com by admin', $comment);
             return $order;
@@ -197,15 +229,23 @@ class IndexTest extends TestCase
             $trace[] = 'load';
             return $order;
         });
-        $repository->method('save')->willReturnCallback(static function ($order) use (&$trace, $options, $address) {
+        $repository->method('save')->willReturnCallback(static function ($order) use (
+            &$trace,
+            $options,
+            $address,
+            $shippingAddress
+        ) {
             $trace[] = 'save';
             self::assertSame('new@example.com', $address->getEmail());
+            self::assertSame('new@example.com', $shippingAddress->getEmail());
             if (!empty($options['saveFailure'])) {
                 throw new RuntimeException('relation failure');
             }
             return $order;
         });
-        $customer = $this->createConfiguredMock(CustomerInterface::class, ['getId' => 99, 'getGroupId' => 3, 'getEmail' => 'new@example.com']);
+        $customer = $this->createConfiguredMock(CustomerInterface::class, [
+            'getId' => 99, 'getGroupId' => 3, 'getEmail' => 'new@example.com',
+        ]);
         $provider = $this->createMock(CustomerProvider::class);
         $provider->method('getCustomerByEmail')->willReturn(!empty($options['existing']) ? $customer : null);
         $creator = $this->createMock(NewCustomerCreator::class);
@@ -214,12 +254,16 @@ class IndexTest extends TestCase
             self::assertSame(0, $order->getCustomerId());
             if (isset($options['creationFailure'])) {
                 throw $options['creationFailure'];
-
-            } return $customer;
+            }
+            return $customer;
         });
         $customerRepository = $this->createMock(CustomerRepositoryInterface::class);
         $customerRepository->method('getById')->willReturn($customer);
-        $customerRepository->method('save')->willReturnCallback(static function ($customer) use (&$trace, &$level, $options) {
+        $customerRepository->method('save')->willReturnCallback(static function ($customer) use (
+            &$trace,
+            &$level,
+            $options
+        ) {
             $trace[] = 'customer-save';
             if (!empty($options['nested'])) {
                 ++$level;
@@ -232,36 +276,53 @@ class IndexTest extends TestCase
         $validator = $this->createMock(EmailAddress::class);
         $validator->method('isValid')->willReturn(empty($options['invalid']));
         $user = $this->createConfiguredMock(User::class, ['getUserName' => 'admin']);
-        $session = $this->getMockBuilder(Session::class)->disableOriginalConstructor()->addMethods(['getUser'])->getMock();
+        $session = $this->getMockBuilder(Session::class)
+            ->disableOriginalConstructor()->addMethods(['getUser'])->getMock();
         $session->method('getUser')->willReturn($user);
         $lock = $this->createMock(LockManagerInterface::class);
         $lock->method('lock')->willReturnCallback(static function ($name, $timeout) use (&$trace, $options) {
             self::assertSame('order_update_42', $name);
             self::assertSame(30, $timeout);
             $trace[] = 'lock';
+            if (!empty($options['lockFailure'])) {
+                throw new RuntimeException('Lock failure');
+            }
             return empty($options['timeout']);
         });
         $lock->method('unlock')->willReturnCallback(static function () use (&$trace, $options) {
             $trace[] = 'unlock';
             if (!empty($options['unlockFailure'])) {
                 throw new RuntimeException();
-
-            } return true;
+            }
+            return true;
         });
         $connection = $this->createMock(AdapterInterface::class);
         $connection->method('getTransactionLevel')->willReturnCallback(static function () use (&$level) {
             return $level;
         });
-        $connection->method('beginTransaction')->willReturnCallback(static function () use (&$trace, &$level, $connection, $options) {
+        $connection->method('beginTransaction')->willReturnCallback(static function () use (
+            &$trace,
+            &$level,
+            $connection,
+            $options
+        ) {
             $trace[] = 'begin';
             if (!empty($options['beginFailure'])) {
                 throw new RuntimeException();
-
-            } ++$level;
+            }
+            ++$level;
             return $connection;
         });
-        $connection->method('commit')->willReturnCallback(static function () use (&$trace, &$level, $connection) {
+        $connection->method('commit')->willReturnCallback(static function () use (
+            &$trace,
+            &$level,
+            $connection,
+            $options
+        ) {
             $trace[] = 'commit';
+            if (!empty($options['commitFailure'])) {
+                throw new RuntimeException('Commit failure');
+            }
             --$level;
             return $connection;
         });
@@ -272,7 +333,20 @@ class IndexTest extends TestCase
         });
         $resource = $this->createMock(ResourceConnection::class);
         $resource->method('getConnection')->willReturn($connection);
-        $controller = new Index($context, $repository, $factory, $customerRepository, $validator, $session, $provider, $creator, $lock, $resource, new Escaper(), $this->createMock(LoggerInterface::class));
+        $controller = new Index(
+            $context,
+            $repository,
+            $factory,
+            $customerRepository,
+            $validator,
+            $session,
+            $provider,
+            $creator,
+            $lock,
+            $resource,
+            new Escaper(),
+            $this->createMock(LoggerInterface::class)
+        );
         $controller->execute();
         return [$response, $trace, $order];
     }
