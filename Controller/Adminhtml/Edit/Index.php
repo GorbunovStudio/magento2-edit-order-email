@@ -15,6 +15,7 @@ use Magento\Customer\Api\Data\CustomerInterface;
 use Magento\Framework\App\ResourceConnection;
 use Magento\Framework\App\Request\Http;
 use Magento\Framework\Controller\Result\JsonFactory;
+use Magento\Framework\DB\Adapter\AdapterInterface;
 use Magento\Framework\Escaper;
 use Magento\Framework\Exception\AlreadyExistsException;
 use Magento\Framework\Exception\InputException;
@@ -86,25 +87,11 @@ class Index extends Action
                 throw new ValidationException(__('Order not found or email mismatch.'));
             }
             $connection = $this->resourceConnection->getConnection();
-            $select = $connection->select()
-                ->from($this->resourceConnection->getTableName('sales_order'), ['customer_id'])
-                ->where('entity_id = ?', $orderId);
-            $discoveredCustomerId = (int)$connection->fetchOne($select);
-            $orderIds = [$orderId];
-            if ($discoveredCustomerId && !$request->getPost('create_new_customer')) {
-                $select = $connection->select()
-                    ->from($this->resourceConnection->getTableName('customer_entity'), ['email'])
-                    ->where('entity_id = ?', $discoveredCustomerId);
-                $accountEmail = $connection->fetchOne($select);
-                if ($accountEmail !== false) {
-                    $select = $connection->select()
-                        ->from($this->resourceConnection->getTableName('sales_order'), ['entity_id'])
-                        ->where('customer_id = ?', $discoveredCustomerId)->where('customer_email = ?', $accountEmail);
-                    $orderIds = array_merge($orderIds, array_map('intval', $connection->fetchCol($select)));
-                }
-            }
-            $orderIds = array_unique($orderIds);
-            sort($orderIds, SORT_NUMERIC);
+            [$discoveredCustomerId, $orderIds] = $this->discoverOrderIds(
+                $connection,
+                $orderId,
+                (bool)$request->getPost('create_new_customer')
+            );
             foreach ($orderIds as $id) {
                 $lockName = LockNamePrefixInterface::ORDER_UPDATE . $id;
                 if (!$this->lockManager->lock($lockName, self::LOCK_TIMEOUT)) {
@@ -222,5 +209,33 @@ class Index extends Action
         $order->setCustomerId((int)$customer->getId());
         $order->setCustomerGroupId((int)$customer->getGroupId());
         $order->setCustomerIsGuest(0);
+    }
+
+    /**
+     * @return mixed[]
+     * @phpstan-return array{int, list<int>}
+     */
+    private function discoverOrderIds(AdapterInterface $connection, int $orderId, bool $createCustomer): array
+    {
+        $select = $connection->select()
+            ->from($this->resourceConnection->getTableName('sales_order'), ['customer_id'])
+            ->where('entity_id = ?', $orderId);
+        $customerId = (int)$connection->fetchOne($select);
+        $orderIds = [$orderId];
+        if ($customerId && !$createCustomer) {
+            $select = $connection->select()
+                ->from($this->resourceConnection->getTableName('customer_entity'), ['email'])
+                ->where('entity_id = ?', $customerId);
+            $accountEmail = $connection->fetchOne($select);
+            if ($accountEmail !== false) {
+                $select = $connection->select()
+                    ->from($this->resourceConnection->getTableName('sales_order'), ['entity_id'])
+                    ->where('customer_id = ?', $customerId)->where('customer_email = ?', $accountEmail);
+                $orderIds = array_merge($orderIds, array_map('intval', $connection->fetchCol($select)));
+            }
+        }
+        $orderIds = array_unique($orderIds);
+        sort($orderIds, SORT_NUMERIC);
+        return [$customerId, $orderIds];
     }
 }
