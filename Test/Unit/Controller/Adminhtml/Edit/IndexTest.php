@@ -214,6 +214,8 @@ class IndexTest extends TestCase
 
     public function testChangedSelectedCustomerLinkRejectsOnlyExistingAccountUpdate(): void
     {
+        [$response] = $this->runAction(['discoveredId' => '7']);
+        self::assertFalse($response['error']);
         foreach ([0, 12] as $discoveredId) {
             [$response, $trace] = $this->runAction(['discoveredId' => $discoveredId]);
             self::assertTrue($response['error']);
