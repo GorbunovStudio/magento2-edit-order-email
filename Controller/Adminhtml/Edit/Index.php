@@ -86,16 +86,19 @@ class Index extends Action
                 throw new ValidationException(__('Order not found or email mismatch.'));
             }
             $connection = $this->resourceConnection->getConnection();
-            $select = $connection->select()->from($this->resourceConnection->getTableName('sales_order'), ['customer_id'])
+            $select = $connection->select()
+                ->from($this->resourceConnection->getTableName('sales_order'), ['customer_id'])
                 ->where('entity_id = ?', $orderId);
             $discoveredCustomerId = (int)$connection->fetchOne($select);
             $orderIds = [$orderId];
             if ($discoveredCustomerId && !$request->getPost('create_new_customer')) {
-                $select = $connection->select()->from($this->resourceConnection->getTableName('customer_entity'), ['email'])
+                $select = $connection->select()
+                    ->from($this->resourceConnection->getTableName('customer_entity'), ['email'])
                     ->where('entity_id = ?', $discoveredCustomerId);
                 $accountEmail = $connection->fetchOne($select);
                 if ($accountEmail !== false) {
-                    $select = $connection->select()->from($this->resourceConnection->getTableName('sales_order'), ['entity_id'])
+                    $select = $connection->select()
+                        ->from($this->resourceConnection->getTableName('sales_order'), ['entity_id'])
                         ->where('customer_id = ?', $discoveredCustomerId)->where('customer_email = ?', $accountEmail);
                     $orderIds = array_merge($orderIds, array_map('intval', $connection->fetchCol($select)));
                 }

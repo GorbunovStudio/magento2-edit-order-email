@@ -262,6 +262,11 @@ class IndexTest extends TestCase
             'from:sales_order', 'where:customer_id = ?:7', 'where:customer_email = ?:account@example.com',
             'lock:3', 'lock:42', 'begin', 'load', 'target-lookup', 'save', 'commit', 'unlock:42', 'unlock:3',
         ], $trace);
+        [$response, $trace] = $this->runAction([
+            'peers' => [3, 42], 'traceLocks' => true, 'existing' => true,
+        ]);
+        self::assertTrue($response['error']);
+        self::assertSame(['lock:3', 'lock:42', 'begin', 'load', 'rollback', 'unlock:42', 'unlock:3'], $trace);
     }
 
     /**
@@ -344,7 +349,11 @@ class IndexTest extends TestCase
             'getId' => 99, 'getGroupId' => 3, 'getEmail' => 'new@example.com',
         ]);
         $provider = $this->createMock(CustomerProvider::class);
-        $provider->method('getCustomerByEmail')->willReturnCallback(static function () use (&$trace, $options, $customer) {
+        $provider->method('getCustomerByEmail')->willReturnCallback(static function () use (
+            &$trace,
+            $options,
+            $customer
+        ) {
             if (!empty($options['traceDiscovery'])) {
                 $trace[] = 'target-lookup';
             }
@@ -407,7 +416,11 @@ class IndexTest extends TestCase
             }
             return $select;
         });
-        $select->method('where')->willReturnCallback(static function ($condition, $value) use ($select, &$trace, $options) {
+        $select->method('where')->willReturnCallback(static function ($condition, $value) use (
+            $select,
+            &$trace,
+            $options
+        ) {
             if (!empty($options['traceDiscovery'])) {
                 $trace[] = 'where:' . $condition . ':' . $value;
             }
