@@ -418,7 +418,10 @@ class IndexTest extends TestCase
             }
             return $select;
         });
-        $select->method('where')->willReturnCallback(static function ($condition, $value) use (
+        $select->method('where')->willReturnCallback(static function (
+            $condition,
+            $value
+        ) use (
             $select,
             &$trace,
             $options

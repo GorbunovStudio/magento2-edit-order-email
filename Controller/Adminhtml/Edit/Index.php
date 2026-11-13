@@ -212,6 +212,9 @@ class Index extends Action
     }
 
     /**
+     * @param \Magento\Framework\DB\Adapter\AdapterInterface $connection
+     * @param int $orderId
+     * @param bool $createCustomer
      * @return mixed[]
      * @phpstan-return array{int, list<int>}
      */
