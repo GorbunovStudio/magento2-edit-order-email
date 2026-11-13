@@ -66,6 +66,26 @@ class IndexTest extends TestCase
         }
     }
 
+    public function testCaseVariantReassignmentReturnsAndPersistsCustomerEmail(): void
+    {
+        [$response, , $order] = $this->runAction([
+            'existing' => true,
+            'assign' => true,
+            'email' => 'NEW@EXAMPLE.COM',
+        ]);
+        self::assertFalse($response['error']);
+        self::assertSame('new@example.com', $order->getCustomerEmail());
+        self::assertSame($order->getCustomerEmail(), $response['email']);
+
+        [$nextResponse] = $this->runAction([
+            'oldEmail' => $response['email'],
+            'currentEmail' => $order->getCustomerEmail(),
+            'email' => 'next@example.com',
+        ]);
+        self::assertFalse($nextResponse['error']);
+        self::assertSame('next@example.com', $nextResponse['email']);
+    }
+
     public function testCreationForGuestAndRegisteredOrders(): void
     {
         foreach ([0, 7] as $customerId) {
@@ -197,8 +217,10 @@ class IndexTest extends TestCase
         $level = 0;
         $request = $this->createMock(Http::class);
         $post = [
-            'order_id' => 42, 'email' => !empty($options['same']) ? 'old@example.com' : 'new@example.com',
-            'old_email' => 'old@example.com', 'create_new_customer' => $options['create'] ?? false,
+            'order_id' => 42,
+            'email' => $options['email'] ?? (!empty($options['same']) ? 'old@example.com' : 'new@example.com'),
+            'old_email' => $options['oldEmail'] ?? 'old@example.com',
+            'create_new_customer' => $options['create'] ?? false,
             'assign_to_another_customer' => $options['assign'] ?? false,
         ];
         $request->method('getPost')->willReturnCallback(static fn ($key) => $post[$key]);
@@ -224,7 +246,8 @@ class IndexTest extends TestCase
         $order->setData([
             'entity_id' => 42,
             'customer_id' => $options['customerId'] ?? 7,
-            'customer_email' => !empty($options['stale']) ? 'other@example.com' : 'old@example.com',
+            'customer_email' => $options['currentEmail']
+                ?? (!empty($options['stale']) ? 'other@example.com' : 'old@example.com'),
             'store_id' => 1,
             'unrelated' => 'unchanged',
             'send_email' => 1,
@@ -232,8 +255,11 @@ class IndexTest extends TestCase
         ]);
         $order->method('getStore')->willReturn($store);
         $order->method('getAddresses')->willReturn([$address, $shippingAddress]);
-        $order->method('addStatusHistoryComment')->willReturnCallback(static function ($comment) use ($order) {
-            self::assertSame('Order email address change from old@example.com to new@example.com by admin', $comment);
+        $order->method('addStatusHistoryComment')->willReturnCallback(static function ($comment) use ($order, $post) {
+            self::assertSame(
+                'Order email address change from ' . $post['old_email'] . ' to ' . $post['email'] . ' by admin',
+                $comment
+            );
             return $order;
         });
         $repository = $this->createMock(OrderRepositoryInterface::class);
@@ -245,11 +271,13 @@ class IndexTest extends TestCase
             &$trace,
             $options,
             $address,
-            $shippingAddress
+            $shippingAddress,
+            $post
         ) {
             $trace[] = 'save';
-            self::assertSame('new@example.com', $address->getEmail());
-            self::assertSame('new@example.com', $shippingAddress->getEmail());
+            $expectedEmail = !empty($options['existing']) ? 'new@example.com' : $post['email'];
+            self::assertSame($expectedEmail, $address->getEmail());
+            self::assertSame($expectedEmail, $shippingAddress->getEmail());
             if (!empty($options['saveFailure'])) {
                 throw new RuntimeException('relation failure');
             }

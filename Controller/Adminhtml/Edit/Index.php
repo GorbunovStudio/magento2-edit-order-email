@@ -128,8 +128,9 @@ class Index extends Action
                     $this->assignCustomer($order, $customer);
                 }
 
+                $effectiveEmail = $order->getCustomerEmail();
                 foreach ($order->getAddresses() as $address) {
-                    $address->setEmail($email);
+                    $address->setEmail($effectiveEmail);
                 }
                 $comment = sprintf(
                     (string)__('Order email address change from %s to %s by %s'),
@@ -144,7 +145,7 @@ class Index extends Action
                 $response = [
                     'error' => false,
                     'message' => __('Email address successfully changed.'),
-                    'email' => $email,
+                    'email' => $effectiveEmail,
                     'ajaxExpired' => false,
                 ];
             }
