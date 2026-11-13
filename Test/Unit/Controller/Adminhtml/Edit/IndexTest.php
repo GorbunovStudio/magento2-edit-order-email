@@ -51,6 +51,8 @@ class IndexTest extends TestCase
             self::assertSame('new@example.com', $order->getCustomerEmail());
             self::assertSame(['lock', 'begin', 'load', 'save', 'commit', 'unlock'], $trace);
             self::assertSame('unchanged', $order->getData('unrelated'));
+            self::assertSame(1, $order->getSendEmail());
+            self::assertSame(1, $order->getEmailSent());
         }
     }
 
@@ -154,6 +156,14 @@ class IndexTest extends TestCase
 
     public function testCreationValidationAndBeginFailure(): void
     {
+        $aggregate = new InputException();
+        $aggregate->addError(new Phrase('Name is required'));
+        $aggregate->addError(new Phrase('Address is required'));
+        [$response, $trace] = $this->runAction(['create' => true, 'creationFailure' => $aggregate]);
+        self::assertTrue($response['error']);
+        self::assertStringContainsString('Name is required', $response['message']);
+        self::assertStringContainsString('Address is required', $response['message']);
+        self::assertSame(['lock', 'begin', 'load', 'create', 'rollback', 'unlock'], $trace);
         [$response, $trace] = $this->runAction([
             'create' => true, 'creationFailure' => new InputMismatchException(new Phrase('Email already exists')),
         ]);
@@ -217,6 +227,8 @@ class IndexTest extends TestCase
             'customer_email' => !empty($options['stale']) ? 'other@example.com' : 'old@example.com',
             'store_id' => 1,
             'unrelated' => 'unchanged',
+            'send_email' => 1,
+            'email_sent' => 1,
         ]);
         $order->method('getStore')->willReturn($store);
         $order->method('getAddresses')->willReturn([$address, $shippingAddress]);
