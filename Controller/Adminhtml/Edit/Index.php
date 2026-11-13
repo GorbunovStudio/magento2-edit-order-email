@@ -167,12 +167,6 @@ class Index extends Action
                 $messages = [];
                 if ($e instanceof InputException || $e instanceof ValidationException) {
                     foreach ($e->getErrors() as $error) {
-                        if ($error->getPrevious()) {
-                            $this->logger->error('Edit order email validation failed.', [
-                                'order_id' => $orderId, 'type' => get_class($error),
-                            ]);
-                            return $result->setData($response);
-                        }
                         $messages[] = $error->getMessage();
                     }
                 }
@@ -198,14 +192,9 @@ class Index extends Action
 
     private function assignCustomer(OrderInterface $order, CustomerInterface $customer): void
     {
-        $customerId = $customer->getId();
-        $groupId = $customer->getGroupId();
-        if ($customerId === null || $groupId === null) {
-            throw new RuntimeException('Customer ID or group is missing.');
-        }
         $order->setCustomerEmail($customer->getEmail());
-        $order->setCustomerId($customerId);
-        $order->setCustomerGroupId($groupId);
+        $order->setCustomerId((int)$customer->getId());
+        $order->setCustomerGroupId((int)$customer->getGroupId());
         $order->setCustomerIsGuest(0);
     }
 }
