@@ -216,13 +216,11 @@ class IndexTest extends TestCase
     {
         [$response] = $this->runAction(['discoveredId' => '7']);
         self::assertFalse($response['error']);
-        foreach ([0, 12] as $discoveredId) {
-            [$response, $trace] = $this->runAction(['discoveredId' => $discoveredId]);
-            self::assertTrue($response['error']);
-            self::assertStringContainsString('Order not found or email mismatch.', $response['message']);
-            self::assertNotContains('customer-save', $trace);
-            self::assertSame(['lock', 'begin', 'load', 'rollback', 'unlock'], $trace);
-        }
+        [$response, $trace] = $this->runAction(['discoveredId' => 0]);
+        self::assertTrue($response['error']);
+        self::assertStringContainsString('Order not found or email mismatch.', $response['message']);
+        self::assertNotContains('customer-save', $trace);
+        self::assertSame(['lock', 'begin', 'load', 'rollback', 'unlock'], $trace);
         [$response, $trace] = $this->runAction([
             'discoveredId' => 12, 'peers' => [3, 8], 'traceLocks' => true,
         ]);

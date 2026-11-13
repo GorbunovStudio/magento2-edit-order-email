@@ -230,12 +230,10 @@ class Index extends Action
                 ->from($this->resourceConnection->getTableName('customer_entity'), ['email'])
                 ->where('entity_id = ?', $customerId);
             $accountEmail = $connection->fetchOne($select);
-            if ($accountEmail !== false) {
-                $select = $connection->select()
-                    ->from($this->resourceConnection->getTableName('sales_order'), ['entity_id'])
-                    ->where('customer_id = ?', $customerId)->where('customer_email = ?', $accountEmail);
-                $orderIds = array_merge($orderIds, array_map('intval', $connection->fetchCol($select)));
-            }
+            $select = $connection->select()
+                ->from($this->resourceConnection->getTableName('sales_order'), ['entity_id'])
+                ->where('customer_id = ?', $customerId)->where('customer_email = ?', $accountEmail);
+            $orderIds = array_merge($orderIds, array_map('intval', $connection->fetchCol($select)));
         }
         $orderIds = array_unique($orderIds);
         sort($orderIds, SORT_NUMERIC);
