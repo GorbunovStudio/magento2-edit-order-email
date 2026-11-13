@@ -176,7 +176,10 @@ class IndexTest extends TestCase
         $context->method('getEventManager')->willReturn($events);
         $response = [];
         $result = $this->createMock(Json::class);
-        $result->method('setData')->willReturnCallback(static function ($data) use (&$response, $result) { $response = $data; return $result; });
+        $result->method('setData')->willReturnCallback(static function ($data) use (&$response, $result) {
+            $response = $data;
+            return $result;
+        });
         $factory = $this->createMock(JsonFactory::class);
         $factory->method('create')->willReturn($result);
         $store = $this->createConfiguredMock(StoreInterface::class, ['getWebsiteId' => 1]);
@@ -190,24 +193,40 @@ class IndexTest extends TestCase
             return $order;
         });
         $repository = $this->createMock(OrderRepositoryInterface::class);
-        $repository->method('get')->willReturnCallback(static function () use (&$trace, $order) { $trace[] = 'load'; return $order; });
+        $repository->method('get')->willReturnCallback(static function () use (&$trace, $order) {
+            $trace[] = 'load';
+            return $order;
+        });
         $repository->method('save')->willReturnCallback(static function ($order) use (&$trace, $options, $address) {
             $trace[] = 'save';
             self::assertSame('new@example.com', $address->getEmail());
-            if (!empty($options['saveFailure'])) { throw new RuntimeException('relation failure'); }
+            if (!empty($options['saveFailure'])) {
+                throw new RuntimeException('relation failure');
+            }
             return $order;
         });
         $customer = $this->createConfiguredMock(CustomerInterface::class, ['getId' => 99, 'getGroupId' => 3, 'getEmail' => 'new@example.com']);
         $provider = $this->createMock(CustomerProvider::class);
         $provider->method('getCustomerByEmail')->willReturn(!empty($options['existing']) ? $customer : null);
         $creator = $this->createMock(NewCustomerCreator::class);
-        $creator->method('create')->willReturnCallback(static function () use (&$trace, $customer, $order, $options) { $trace[] = 'create'; self::assertSame(0, $order->getCustomerId()); if (isset($options['creationFailure'])) { throw $options['creationFailure']; } return $customer; });
+        $creator->method('create')->willReturnCallback(static function () use (&$trace, $customer, $order, $options) {
+            $trace[] = 'create';
+            self::assertSame(0, $order->getCustomerId());
+            if (isset($options['creationFailure'])) {
+                throw $options['creationFailure'];
+
+            } return $customer;
+        });
         $customerRepository = $this->createMock(CustomerRepositoryInterface::class);
         $customerRepository->method('getById')->willReturn($customer);
         $customerRepository->method('save')->willReturnCallback(static function ($customer) use (&$trace, &$level, $options) {
             $trace[] = 'customer-save';
-            if (!empty($options['nested'])) { ++$level; }
-            if (isset($options['failure'])) { throw $options['failure']; }
+            if (!empty($options['nested'])) {
+                ++$level;
+            }
+            if (isset($options['failure'])) {
+                throw $options['failure'];
+            }
             return $customer;
         });
         $validator = $this->createMock(EmailAddress::class);
@@ -216,13 +235,41 @@ class IndexTest extends TestCase
         $session = $this->getMockBuilder(Session::class)->disableOriginalConstructor()->addMethods(['getUser'])->getMock();
         $session->method('getUser')->willReturn($user);
         $lock = $this->createMock(LockManagerInterface::class);
-        $lock->method('lock')->willReturnCallback(static function ($name, $timeout) use (&$trace, $options) { self::assertSame('order_update_42', $name); self::assertSame(30, $timeout); $trace[] = 'lock'; return empty($options['timeout']); });
-        $lock->method('unlock')->willReturnCallback(static function () use (&$trace, $options) { $trace[] = 'unlock'; if (!empty($options['unlockFailure'])) { throw new RuntimeException(); } return true; });
+        $lock->method('lock')->willReturnCallback(static function ($name, $timeout) use (&$trace, $options) {
+            self::assertSame('order_update_42', $name);
+            self::assertSame(30, $timeout);
+            $trace[] = 'lock';
+            return empty($options['timeout']);
+        });
+        $lock->method('unlock')->willReturnCallback(static function () use (&$trace, $options) {
+            $trace[] = 'unlock';
+            if (!empty($options['unlockFailure'])) {
+                throw new RuntimeException();
+
+            } return true;
+        });
         $connection = $this->createMock(AdapterInterface::class);
-        $connection->method('getTransactionLevel')->willReturnCallback(static function () use (&$level) { return $level; });
-        $connection->method('beginTransaction')->willReturnCallback(static function () use (&$trace, &$level, $connection, $options) { $trace[] = 'begin'; if (!empty($options['beginFailure'])) { throw new RuntimeException(); } ++$level; return $connection; });
-        $connection->method('commit')->willReturnCallback(static function () use (&$trace, &$level, $connection) { $trace[] = 'commit'; --$level; return $connection; });
-        $connection->method('rollBack')->willReturnCallback(static function () use (&$trace, &$level, $connection) { $trace[] = 'rollback'; --$level; return $connection; });
+        $connection->method('getTransactionLevel')->willReturnCallback(static function () use (&$level) {
+            return $level;
+        });
+        $connection->method('beginTransaction')->willReturnCallback(static function () use (&$trace, &$level, $connection, $options) {
+            $trace[] = 'begin';
+            if (!empty($options['beginFailure'])) {
+                throw new RuntimeException();
+
+            } ++$level;
+            return $connection;
+        });
+        $connection->method('commit')->willReturnCallback(static function () use (&$trace, &$level, $connection) {
+            $trace[] = 'commit';
+            --$level;
+            return $connection;
+        });
+        $connection->method('rollBack')->willReturnCallback(static function () use (&$trace, &$level, $connection) {
+            $trace[] = 'rollback';
+            --$level;
+            return $connection;
+        });
         $resource = $this->createMock(ResourceConnection::class);
         $resource->method('getConnection')->willReturn($connection);
         $controller = new Index($context, $repository, $factory, $customerRepository, $validator, $session, $provider, $creator, $lock, $resource, new Escaper(), $this->createMock(LoggerInterface::class));
