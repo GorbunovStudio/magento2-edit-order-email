@@ -1,237 +1,242 @@
 <?php
-/**
- * Copyright © MagePal LLC. All rights reserved.
- * See COPYING.txt for license details.
- * https://www.magepal.com | support@magepal.com
-*/
+
+declare(strict_types=1);
 
 namespace MagePal\EditOrderEmail\Controller\Adminhtml\Edit;
 
-use Exception;
+use Budsies\General\Interface\LockNamePrefixInterface;
+use Budsies\Sales\Service\CustomerProvider;
+use Budsies\Sales\Service\NewCustomerCreator;
 use Magento\Backend\App\Action;
 use Magento\Backend\App\Action\Context;
 use Magento\Backend\Model\Auth\Session;
-use Magento\Customer\Api\AccountManagementInterface;
 use Magento\Customer\Api\CustomerRepositoryInterface;
-use Magento\Framework\Controller\Result\Json;
+use Magento\Customer\Api\Data\CustomerInterface;
+use Magento\Framework\App\ResourceConnection;
+use Magento\Framework\App\Request\Http;
 use Magento\Framework\Controller\Result\JsonFactory;
+use Magento\Framework\DB\Adapter\AdapterInterface;
+use Magento\Framework\Escaper;
+use Magento\Framework\Exception\AlreadyExistsException;
+use Magento\Framework\Exception\InputException;
+use Magento\Framework\Exception\State\InputMismatchException;
+use Magento\Framework\Lock\LockManagerInterface;
+use Magento\Framework\Validation\ValidationException;
 use Magento\Framework\Validator\EmailAddress;
-use Magento\Sales\Api\OrderCustomerManagementInterface;
+use Magento\Sales\Api\Data\OrderInterface;
 use Magento\Sales\Api\OrderRepositoryInterface;
-use Budsies\Sales\Service\CustomerProvider;
-use Budsies\Sales\Service\BindCustomerWithOrders;
+use Magento\Sales\Model\Order;
 use Psr\Log\LoggerInterface;
-
+use RuntimeException;
+use Throwable;
 
 class Index extends Action
 {
+    public const ADMIN_RESOURCE = 'MagePal_EditOrderEmail::magepal_editorderemail';
+    private const LOCK_TIMEOUT = 30;
 
-    const ADMIN_RESOURCE = 'MagePal_EditOrderEmail::magepal_editorderemail';
-    /**
-     * @var OrderRepositoryInterface
-     */
-    protected $orderRepository;
-
-    /**
-     * @var AccountManagementInterface
-     */
-    protected $accountManagement;
-
-    /**
-     * @var OrderCustomerManagementInterface
-     */
-    protected $orderCustomerService;
-
-    /**
-     * @var CustomerRepositoryInterface $customerRepository
-     */
-    protected $customerRepository;
-
-    /**
-     * @var JsonFactory
-     */
-    protected $resultJsonFactory;
-    /**
-     * @var EmailAddress
-     */
-    private $emailAddressValidator;
-    /**
-     * @var Session
-     */
-    private $authSession;
-    /**
-     * @var CustomerProvider
-     */
-    private CustomerProvider $customerProvider;
-
-    /**
-     * @var BindCustomerWithOrders
-     */
-    private BindCustomerWithOrders $bindCustomerWithOrders;
-
-    /**
-     * @var LoggerInterface
-     */
-    private LoggerInterface $logger;
-
-    /**
-     * Index constructor.
-     * @param Context $context
-     * @param OrderRepositoryInterface $orderRepository
-     * @param AccountManagementInterface $accountManagement
-     * @param OrderCustomerManagementInterface $orderCustomerService
-     * @param JsonFactory $resultJsonFactory
-     * @param CustomerRepositoryInterface $customerRepository
-     * @param EmailAddress $emailAddressValidator
-     * @param Session $authSession
-     * @param CustomerProvider $customerProvider
-     * @param BindCustomerWithOrders $bindCustomerWithOrders
-     * @param LoggerInterface $logger
-     */
     public function __construct(
         Context $context,
-        OrderRepositoryInterface $orderRepository,
-        AccountManagementInterface $accountManagement,
-        OrderCustomerManagementInterface $orderCustomerService,
-        JsonFactory $resultJsonFactory,
-        CustomerRepositoryInterface $customerRepository,
-        EmailAddress $emailAddressValidator,
-        Session $authSession,
-        CustomerProvider $customerProvider,
-        BindCustomerWithOrders $bindCustomerWithOrders,
-        LoggerInterface $logger,
+        private OrderRepositoryInterface $orderRepository,
+        private JsonFactory $resultJsonFactory,
+        private CustomerRepositoryInterface $customerRepository,
+        private EmailAddress $emailAddressValidator,
+        private Session $authSession,
+        private CustomerProvider $customerProvider,
+        private NewCustomerCreator $newCustomerCreator,
+        private LockManagerInterface $lockManager,
+        private ResourceConnection $resourceConnection,
+        private Escaper $escaper,
+        private LoggerInterface $logger,
     ) {
         parent::__construct($context);
+    }
 
-        $this->orderRepository = $orderRepository;
-        $this->orderCustomerService = $orderCustomerService;
-        $this->resultJsonFactory = $resultJsonFactory;
-        $this->accountManagement = $accountManagement;
-        $this->customerRepository = $customerRepository;
-        $this->emailAddressValidator = $emailAddressValidator;
-        $this->authSession = $authSession;
-        $this->customerProvider = $customerProvider;
-        $this->bindCustomerWithOrders = $bindCustomerWithOrders;
-        $this->logger = $logger;
+    public function execute()
+    {
+        $result = $this->resultJsonFactory->create();
+        $orderId = null;
+        $acquiredLocks = [];
+        $started = false;
+        $connection = null;
+        $initialLevel = 0;
+        $response = [
+            'error' => true,
+            'message' => __('Unable to change the email address.'),
+            'email' => '',
+            'ajaxExpired' => false,
+        ];
+
+        try {
+            $request = $this->getRequest();
+            if (!$request instanceof Http) {
+                throw new RuntimeException('Unexpected request type.');
+            }
+            $orderId = $request->getPost('order_id');
+            $email = $request->getPost('email');
+            $oldEmail = $request->getPost('old_email');
+            if (!is_scalar($orderId) || !ctype_digit((string)$orderId) || (int)$orderId <= 0) {
+                throw new ValidationException(__('Invalid order id.'));
+            }
+            $orderId = (int)$orderId;
+            if (!is_string($email) || !$this->emailAddressValidator->isValid(trim($email))) {
+                throw new ValidationException(__('Invalid Email address.'));
+            }
+            $email = trim($email);
+            if (!is_string($oldEmail)) {
+                throw new ValidationException(__('Order not found or email mismatch.'));
+            }
+            $connection = $this->resourceConnection->getConnection();
+            [$discoveredCustomerId, $orderIds] = $this->discoverOrderIds(
+                $connection,
+                $orderId,
+                (bool)$request->getPost('create_new_customer')
+            );
+            foreach ($orderIds as $id) {
+                $lockName = LockNamePrefixInterface::ORDER_UPDATE . $id;
+                if (!$this->lockManager->lock($lockName, self::LOCK_TIMEOUT)) {
+                    break;
+                }
+                $acquiredLocks[] = $lockName;
+            }
+            if (count($acquiredLocks) !== count($orderIds)) {
+                $response['message'] = __('Unable to change the email address right now. Please try again.');
+            } else {
+                $initialLevel = $connection->getTransactionLevel();
+                $connection->beginTransaction();
+                $started = true;
+                $order = $this->orderRepository->get($orderId);
+                if (!$order instanceof Order) {
+                    throw new RuntimeException('Unexpected order type.');
+                }
+                if (!$order->getEntityId() || $order->getCustomerEmail() != $oldEmail) {
+                    throw new ValidationException(__('Order not found or email mismatch.'));
+                }
+                if ($email == $oldEmail) {
+                    throw new ValidationException(__('Email address is the same as the old one.'));
+                }
+
+                $websiteId = (int)$order->getStore()->getWebsiteId();
+                $customer = $this->customerProvider->getCustomerByEmail($email, $websiteId);
+                if ($customer) {
+                    if (!$request->getPost('assign_to_another_customer')) {
+                        throw new ValidationException(__(
+                            'Customer with this email already exists. Please set the checkbox if you want to ' .
+                            're-assign the order to that customer.'
+                        ));
+                    }
+                    $this->assignCustomer($order, $customer);
+                } elseif ($order->getCustomerId() && !$request->getPost('create_new_customer')) {
+                    if ((int)$order->getCustomerId() !== $discoveredCustomerId) {
+                        throw new ValidationException(__('Order not found or email mismatch.'));
+                    }
+                    $customer = $this->customerRepository->getById($order->getCustomerId());
+                    $customer->setEmail($email);
+                    $this->customerRepository->save($customer);
+                    $order->setCustomerEmail($email);
+                } else {
+                    $order->setCustomerId(0);
+                    $order->setCustomerEmail($email);
+                    $customer = $this->newCustomerCreator->create($orderId, (int)$order->getStoreId(), $email);
+                    $this->assignCustomer($order, $customer);
+                }
+
+                $effectiveEmail = $order->getCustomerEmail();
+                foreach ($order->getAddresses() as $address) {
+                    $address->setEmail($effectiveEmail);
+                }
+                $comment = sprintf(
+                    (string)__('Order email address change from %s to %s by %s'),
+                    $oldEmail,
+                    $email,
+                    $this->authSession->getUser()->getUserName()
+                );
+                $order->addStatusHistoryComment($comment);
+                $this->orderRepository->save($order);
+                $connection->commit();
+                $started = false;
+                $response = [
+                    'error' => false,
+                    'message' => __('Email address successfully changed.'),
+                    'email' => $effectiveEmail,
+                    'ajaxExpired' => false,
+                ];
+            }
+        } catch (Throwable $e) {
+            if ($started && $connection !== null) {
+                try {
+                    while ($connection->getTransactionLevel() > $initialLevel) {
+                        $connection->rollBack();
+                    }
+                } catch (Throwable $cleanupError) {
+                    $this->logger->error('Edit order email rollback failed.', [
+                        'order_id' => $orderId, 'type' => get_class($cleanupError),
+                    ]);
+                }
+            }
+            if (($e instanceof InputException || $e instanceof ValidationException
+                || $e instanceof InputMismatchException || $e instanceof AlreadyExistsException) && !$e->getPrevious()
+            ) {
+                $messages = [];
+                if ($e instanceof InputException || $e instanceof ValidationException) {
+                    foreach ($e->getErrors() as $error) {
+                        $messages[] = $error->getMessage();
+                    }
+                }
+                $message = $messages ? implode(' ', $messages) : $e->getMessage();
+                $response['message'] = $this->escaper->escapeHtml($message);
+            } else {
+                $this->logger->error('Edit order email failed.', ['order_id' => $orderId, 'type' => get_class($e)]);
+            }
+        } finally {
+            foreach (array_reverse($acquiredLocks) as $lockName) {
+                try {
+                    $this->lockManager->unlock($lockName);
+                } catch (Throwable $cleanupError) {
+                    $this->logger->error('Edit order email unlock failed.', [
+                        'order_id' => $orderId, 'type' => get_class($cleanupError),
+                    ]);
+                }
+            }
+        }
+
+        return $result->setData($response);
+    }
+
+    private function assignCustomer(OrderInterface $order, CustomerInterface $customer): void
+    {
+        $order->setCustomerEmail($customer->getEmail());
+        $order->setCustomerId((int)$customer->getId());
+        $order->setCustomerGroupId((int)$customer->getGroupId());
+        $order->setCustomerIsGuest(0);
     }
 
     /**
-     * Index action
-     * @return Json
-     * @throws Exception
+     * @param \Magento\Framework\DB\Adapter\AdapterInterface $connection
+     * @param int $orderId
+     * @param bool $createCustomer
+     * @return mixed[]
+     * @phpstan-return array{int, list<int>}
      */
-    public function execute()
+    private function discoverOrderIds(AdapterInterface $connection, int $orderId, bool $createCustomer): array
     {
-        $request = $this->getRequest();
-        $orderId = $request->getPost('order_id');
-        $emailAddress = trim($request->getPost('email'));
-        $oldEmailAddress = $request->getPost('old_email');
-        $createNewCustomerRecord = $request->getPost('create_new_customer');
-        $assignToAnotherCustomerRecord = $request->getPost('assign_to_another_customer');
-        $resultJson = $this->resultJsonFactory->create();
-
-        $this->logger->info(sprintf(
-            '35954 - MagePal - Action started. OrderId: %s, email: %s',
-            (string)$orderId,
-            (string)$emailAddress
-        ));
-
-        if (!isset($orderId)) {
-            return $resultJson->setData([
-                'error' => true,
-                'message' => __('Invalid order id.'),
-                'email' => '',
-                'ajaxExpired' => false
-            ]);
+        $select = $connection->select()
+            ->from($this->resourceConnection->getTableName('sales_order'), ['customer_id'])
+            ->where('entity_id = ?', $orderId);
+        $customerId = (int)$connection->fetchOne($select);
+        $orderIds = [$orderId];
+        if ($customerId && !$createCustomer) {
+            $select = $connection->select()
+                ->from($this->resourceConnection->getTableName('customer_entity'), ['email'])
+                ->where('entity_id = ?', $customerId);
+            $accountEmail = $connection->fetchOne($select);
+            $select = $connection->select()
+                ->from($this->resourceConnection->getTableName('sales_order'), ['entity_id'])
+                ->where('customer_id = ?', $customerId)->where('customer_email = ?', $accountEmail);
+            $orderIds = array_merge($orderIds, array_map('intval', $connection->fetchCol($select)));
         }
-        if (!$this->emailAddressValidator->isValid($emailAddress)) {
-            return $resultJson->setData([
-                'error' => true,
-                'message' => __('Invalid Email address.'),
-                'email' => '',
-                'ajaxExpired' => false
-            ]);
-        }
-        try {
-            $order = $this->orderRepository->get($orderId);
-
-            if (!$order->getEntityId() || $order->getCustomerEmail() != $oldEmailAddress) {
-                throw new \Exception(__('Order not found or email mismatch.'));
-            }
-
-            if ($emailAddress == $oldEmailAddress) {
-                return $resultJson->setData([
-                    'error' => true,
-                    'message' => __('Email address is the same as the old one.'),
-                    'email' => $emailAddress,
-                    'ajaxExpired' => false
-                ]);
-            }
-
-            $websiteId = $order->getStore()->getWebsiteId();
-            $customerForNewEmail = $this->customerProvider->getCustomerByEmail($emailAddress, $websiteId);
-            $hasOrderCustomer = $order->getCustomerId() ? true : false;
-
-            if ($customerForNewEmail) {
-                    if ($assignToAnotherCustomerRecord) {
-                        $order = $this->bindCustomerWithOrders->updateCustomerInOrder($order, $customerForNewEmail);
-                    } else {
-                        return $resultJson->setData([
-                            'error' => true,
-                            'message' => __('Customer with this email already exists. Please set the checkbox if you want to re-assign the order to that customer.'),
-                            'email' => '',
-                            'ajaxExpired' => false
-                        ]);
-                    }
-            } else {
-                if ($hasOrderCustomer && !$createNewCustomerRecord) {
-                    $customerFromOrder = $this->customerRepository->getById($order->getCustomerId());
-                    if (!$customerFromOrder) {
-                        throw new \Exception(__('Customer with email address "'. $oldEmailAddress .'" not found.'));
-                    }
-
-                    $customerFromOrder->setEmail($emailAddress);
-                    $this->customerRepository->save($customerFromOrder);
-
-                    $order->setCustomerEmail($emailAddress);
-                } else {
-                    $order = $this->bindCustomerWithOrders->createNewCustomerAndBindWithOrder($order, $emailAddress);
-                }
-            }
-
-            $comment = sprintf(
-                __('Order email address change from %s to %s by %s'),
-                $oldEmailAddress,
-                $emailAddress,
-                $this->authSession->getUser()->getUserName()
-            );
-            $order->addStatusHistoryComment($comment);
-            $this->orderRepository->save($order);
-
-            $email = $order->getCustomerEmail();
-            foreach ($order->getAddressesCollection() as $address) {
-                $address->setEmail($email)->save();
-            }
-
-            $this->logger->info(sprintf(
-                '35954 - MagePal - Action finished. OrderId: %s, email: %s, old email: %s',
-                (string)$order->getEntityId(),
-                (string)$email,
-                (string)$oldEmailAddress
-            ));
-            return $resultJson->setData([
-                'error' => false,
-                'message' => __('Email address successfully changed.'),
-                'email' => $email,
-                'ajaxExpired' => false
-            ]);
-        } catch (\Exception $e) {
-            return $resultJson->setData([
-                'error' => true,
-                'message' => $e->getMessage(),
-                'email' => '',
-                'ajaxExpired' => false
-            ]);
-        }
+        $orderIds = array_unique($orderIds);
+        sort($orderIds, SORT_NUMERIC);
+        return [$customerId, $orderIds];
     }
 }
