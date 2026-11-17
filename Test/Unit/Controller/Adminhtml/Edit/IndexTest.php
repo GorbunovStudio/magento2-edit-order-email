@@ -285,7 +285,7 @@ class IndexTest extends TestCase
     {
         $trace = [];
         $level = 0;
-        $request = $this->createMock(Http::class);
+        $request = $this->createStub(Http::class);
         $post = [
             'order_id' => 42,
             'email' => $options['email'] ?? (!empty($options['same']) ? 'old@example.com' : 'new@example.com'),
@@ -296,18 +296,19 @@ class IndexTest extends TestCase
         $request->method('getPost')->willReturnCallback(static fn ($key) => $post[$key]);
         $events = $this->createMock(ManagerInterface::class);
         $events->expects(self::never())->method('dispatch');
-        $context = $this->createMock(Context::class);
+        $context = $this->createStub(Context::class);
         $context->method('getRequest')->willReturn($request);
         $context->method('getEventManager')->willReturn($events);
         $response = [];
-        $result = $this->createMock(Json::class);
+        $result = $this->createStub(Json::class);
         $result->method('setData')->willReturnCallback(static function ($data) use (&$response, $result) {
             $response = $data;
             return $result;
         });
-        $factory = $this->createMock(JsonFactory::class);
+        $factory = $this->createStub(JsonFactory::class);
         $factory->method('create')->willReturn($result);
-        $store = $this->createConfiguredMock(StoreInterface::class, ['getWebsiteId' => 1]);
+        $store = $this->createStub(StoreInterface::class);
+        $store->method('getWebsiteId')->willReturn(1);
         $address = $this->getMockBuilder(Address::class)->disableOriginalConstructor()->onlyMethods([])->getMock();
         $shippingAddress = $this->getMockBuilder(Address::class)
             ->disableOriginalConstructor()->onlyMethods([])->getMock();
@@ -331,7 +332,7 @@ class IndexTest extends TestCase
             );
             return $order;
         });
-        $repository = $this->createMock(OrderRepositoryInterface::class);
+        $repository = $this->createStub(OrderRepositoryInterface::class);
         $repository->method('get')->willReturnCallback(static function () use (&$trace, $order) {
             $trace[] = 'load';
             return $order;
@@ -352,10 +353,11 @@ class IndexTest extends TestCase
             }
             return $order;
         });
-        $customer = $this->createConfiguredMock(CustomerInterface::class, [
-            'getId' => 99, 'getGroupId' => 3, 'getEmail' => 'new@example.com',
-        ]);
-        $provider = $this->createMock(CustomerProvider::class);
+        $customer = $this->createStub(CustomerInterface::class);
+        $customer->method('getId')->willReturn(99);
+        $customer->method('getGroupId')->willReturn(3);
+        $customer->method('getEmail')->willReturn('new@example.com');
+        $provider = $this->createStub(CustomerProvider::class);
         $provider->method('getCustomerByEmail')->willReturnCallback(static function () use (
             &$trace,
             $options,
@@ -366,7 +368,7 @@ class IndexTest extends TestCase
             }
             return !empty($options['existing']) ? $customer : null;
         });
-        $creator = $this->createMock(NewCustomerCreator::class);
+        $creator = $this->createStub(NewCustomerCreator::class);
         $creator->method('create')->willReturnCallback(static function () use (&$trace, $customer, $order, $options) {
             $trace[] = 'create';
             self::assertSame(0, $order->getCustomerId());
@@ -375,7 +377,7 @@ class IndexTest extends TestCase
             }
             return $customer;
         });
-        $customerRepository = $this->createMock(CustomerRepositoryInterface::class);
+        $customerRepository = $this->createStub(CustomerRepositoryInterface::class);
         $customerRepository->method('getById')->willReturn($customer);
         $customerRepository->method('save')->willReturnCallback(static function ($customer) use (
             &$trace,
@@ -391,13 +393,15 @@ class IndexTest extends TestCase
             }
             return $customer;
         });
-        $validator = $this->createMock(EmailAddress::class);
+        $validator = $this->createStub(EmailAddress::class);
         $validator->method('isValid')->willReturn(empty($options['invalid']));
-        $user = $this->createConfiguredMock(User::class, ['getUserName' => 'admin']);
-        $session = $this->getMockBuilder(Session::class)
-            ->disableOriginalConstructor()->addMethods(['getUser'])->getMock();
-        $session->method('getUser')->willReturn($user);
-        $lock = $this->createMock(LockManagerInterface::class);
+        $user = $this->createStub(User::class);
+        $user->method('getUserName')->willReturn('admin');
+        $session = $this->createStub(Session::class);
+        $session->method('__call')->willReturnCallback(
+            static fn (string $method) => $method === 'getUser' ? $user : null
+        );
+        $lock = $this->createStub(LockManagerInterface::class);
         $lock->method('lock')->willReturnCallback(static function ($name, $timeout) use (&$trace, $options) {
             $id = (int)substr($name, strlen('order_update_'));
             self::assertSame(30, $timeout);
@@ -415,7 +419,7 @@ class IndexTest extends TestCase
             }
             return true;
         });
-        $connection = $this->createMock(AdapterInterface::class);
+        $connection = $this->createStub(AdapterInterface::class);
         $select = $this->getMockBuilder(Select::class)->disableOriginalConstructor()->getMock();
         $select->method('from')->willReturnCallback(static function ($name) use ($select, &$trace, $options) {
             if (!empty($options['traceDiscovery'])) {
@@ -476,7 +480,7 @@ class IndexTest extends TestCase
             --$level;
             return $connection;
         });
-        $resource = $this->createMock(ResourceConnection::class);
+        $resource = $this->createStub(ResourceConnection::class);
         $resource->method('getConnection')->willReturn($connection);
         $resource->method('getTableName')->willReturnCallback(static fn ($name) => $name);
         $controller = new Index(
@@ -491,7 +495,7 @@ class IndexTest extends TestCase
             $lock,
             $resource,
             new Escaper(),
-            $this->createMock(LoggerInterface::class)
+            $this->createStub(LoggerInterface::class)
         );
         $controller->execute();
         return [$response, $trace, $order];
